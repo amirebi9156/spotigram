@@ -1,6 +1,6 @@
 .env
 state.db
-.spotify_cache
+playlists.txt
 venv/
 __pycache__/
 *.pyc

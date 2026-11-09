@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spotigram - installer & management menu
 # One-line install:
-#   bash <(curl -fsSL https://raw.githubusercontent.com/amirebi9156/spotigram/main/install.sh)
-# After install, just run:  spotigram
+#   sudo bash <(curl -fsSL https://raw.githubusercontent.com/amirebi9156/spotigram/main/install.sh)
+# After install, just run:  sudo spotigram
 set -u
 
 APP_DIR="${SPOTIGRAM_DIR:-/opt/spotigram}"
@@ -11,6 +11,7 @@ BRANCH="${SPOTIGRAM_BRANCH:-main}"
 SERVICE="spotigram"
 UNIT="/etc/systemd/system/${SERVICE}.service"
 ENV_FILE="$APP_DIR/.env"
+PL_FILE="$APP_DIR/playlists.txt"
 VENV="$APP_DIR/venv"
 CLI="/usr/local/bin/spotigram"
 
@@ -68,6 +69,12 @@ mask() {
   else echo "set"; fi
 }
 
+restart_if_running() {
+  if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+    systemctl restart "$SERVICE" && ok "Service restarted"
+  fi
+}
+
 configure() {
   [ -f "$ENV_FILE" ] || cp "$APP_DIR/.env.example" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
@@ -76,24 +83,21 @@ configure() {
   local pairs=(
     "BOT_TOKEN|Telegram bot token (from @BotFather)"
     "CHAT_ID|Telegram supergroup id (starts with -100)"
-    "SPOTIPY_CLIENT_ID|Spotify client id"
-    "SPOTIPY_CLIENT_SECRET|Spotify client secret"
   )
   local p key label cur shown val
   for p in "${pairs[@]}"; do
     key="${p%%|*}"; label="${p#*|}"
     cur="$(get_env "$key")"
     shown="$cur"
-    case "$key" in *TOKEN|*SECRET) shown="$(mask "$cur")";; esac
+    case "$key" in *TOKEN) shown="$(mask "$cur")";; esac
     [ -z "$shown" ] && shown="empty"
     read -r -p "$label [$shown]: " val < /dev/tty
     [ -n "$val" ] && set_env "$key" "$val"
   done
 
-  if yes_no "Edit advanced settings (sync interval, playlist filter, yt-dlp cookies)?" n; then
+  if yes_no "Edit advanced settings (sync interval, yt-dlp cookies)?" n; then
     local adv=(
       "SYNC_INTERVAL|Sync interval in seconds"
-      "ONLY_PLAYLISTS|Only these playlist ids (comma separated, empty = all)"
       "YTDLP_COOKIES|Path to cookies.txt for yt-dlp (empty = none)"
     )
     for p in "${adv[@]}"; do
@@ -105,8 +109,81 @@ configure() {
   fi
   ok "Settings saved to $ENV_FILE"
   if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
-    yes_no "Restart the service to apply?" y && systemctl restart "$SERVICE" && ok "Restarted"
+    yes_no "Restart the service to apply?" y && restart_if_running
   fi
+}
+
+# --------------------------------------------------------------- playlists
+# playlists.txt: one playlist per line ("<22-char id>  # name"); the bot re-reads it every cycle.
+pl_ids() {
+  [ -f "$PL_FILE" ] || return 0
+  grep -vE '^[[:space:]]*(#|$)' "$PL_FILE" | sed 's/#.*//' | awk '{print $1}'
+}
+
+list_playlists() {
+  [ -s "$PL_FILE" ] || { warn "No playlists added yet"; return 1; }
+  local i=0 line
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    i=$((i + 1))
+    printf "%3d) %s\n" "$i" "$line"
+  done < "$PL_FILE"
+  [ "$i" -gt 0 ] || { warn "No playlists added yet"; return 1; }
+}
+
+# returns 1 when the user enters nothing (= finished), 0 otherwise
+add_playlist() {
+  local link out errf pid name n
+  read -r -p "Playlist link (Enter to finish): " link < /dev/tty
+  [ -z "$link" ] && return 1
+  errf="$(mktemp)"
+  if ! out="$(cd "$APP_DIR" && "$VENV/bin/python" bot.py info "$link" 2>"$errf")"; then
+    err "$(cat "$errf")"
+    rm -f "$errf"
+    return 0
+  fi
+  rm -f "$errf"
+  IFS=$'\t' read -r pid name n <<<"$out"
+  if pl_ids | grep -qx "$pid"; then
+    warn "Already added: $name"
+    return 0
+  fi
+  echo "$pid  # $name" >> "$PL_FILE"
+  ok "Added: $name ($n tracks)"
+  if [ "${n:-0}" -ge 100 ]; then
+    warn "Spotify's public page shows at most ~100 tracks per playlist; the rest may be missing"
+  fi
+  return 0
+}
+
+remove_playlist() {
+  list_playlists || return 0
+  local num
+  read -r -p "Number to remove (Enter to cancel): " num < /dev/tty
+  [[ "$num" =~ ^[0-9]+$ ]] || return 0
+  awk -v n="$num" '/^[[:space:]]*(#|$)/ {print; next} {i++; if (i != n) print}' "$PL_FILE" > "$PL_FILE.tmp" \
+    && mv "$PL_FILE.tmp" "$PL_FILE"
+  ok "Removed (the Telegram topic and its songs are kept)"
+  restart_if_running
+}
+
+manage_playlists() {
+  is_installed || { err "Install first"; return 1; }
+  touch "$PL_FILE"
+  local c
+  while true; do
+    echo
+    echo -e "${BOLD}Playlists${NC} (each one must be set to Public in Spotify)"
+    list_playlists
+    echo
+    echo " a) Add    r) Remove    b) Back"
+    read -r -p "Choose: " c < /dev/tty
+    case "$c" in
+      a) while add_playlist; do :; done; restart_if_running;;
+      r) remove_playlist;;
+      b|"") return 0;;
+    esac
+  done
 }
 
 # ------------------------------------------------------------ install parts
@@ -175,29 +252,6 @@ EOF
   systemctl daemon-reload
 }
 
-spotify_login() {
-  is_installed || { err "Install first"; return 1; }
-  if [ -z "$(get_env SPOTIPY_CLIENT_ID)" ] || [ -z "$(get_env SPOTIPY_CLIENT_SECRET)" ]; then
-    err "Spotify client id/secret missing (menu: Edit settings)"; return 1
-  fi
-  local redirect; redirect="$(get_env SPOTIPY_REDIRECT_URI)"
-  echo
-  echo -e "${BOLD}Spotify login${NC}"
-  echo " 1) In your Spotify app settings, the Redirect URI must be exactly:"
-  echo "      ${redirect:-http://127.0.0.1:8888/callback}"
-  echo " 2) Open the link below in any browser and approve access."
-  echo " 3) The final page will fail to load - that is expected."
-  echo "    Copy the FULL URL from the address bar and paste it here."
-  echo
-  rm -f "$APP_DIR/.spotify_cache"
-  if (cd "$APP_DIR" && "$VENV/bin/python" bot.py auth); then
-    chmod 600 "$APP_DIR/.spotify_cache" 2>/dev/null
-    ok "Spotify authorized"
-  else
-    err "Spotify login failed"; return 1
-  fi
-}
-
 # ------------------------------------------------------------ telegram check
 tg_api() { local m="$1"; shift; curl -fsS --max-time 15 "https://api.telegram.org/bot$(get_env BOT_TOKEN)/$m" "$@" 2>/dev/null; }
 
@@ -239,12 +293,15 @@ do_install() {
   setup_venv   || return 1
   configure
   write_service
-  if [ ! -f "$APP_DIR/.spotify_cache" ]; then spotify_login || warn "Run 'Spotify login' from the menu later"; fi
+  touch "$PL_FILE"
+  echo
+  info "Add your Spotify playlist links (Share -> Copy link). Each playlist must be Public."
+  while add_playlist; do :; done
   systemctl enable --now "$SERVICE" >/dev/null 2>&1
   sleep 2
   health_check
   echo
-  ok "Done. Manage anytime with:  ${BOLD}spotigram${NC}"
+  ok "Done. Manage anytime with:  ${BOLD}sudo spotigram${NC}"
 }
 
 do_update() {
@@ -259,7 +316,7 @@ update_ytdlp() {
   is_installed || { err "Not installed"; return 1; }
   info "Updating yt-dlp..."
   "$VENV/bin/pip" install -q -U yt-dlp && ok "yt-dlp $("$VENV/bin/python" -c 'import yt_dlp.version as v; print(v.__version__)')"
-  systemctl restart "$SERVICE" 2>/dev/null && ok "Service restarted"
+  restart_if_running
 }
 
 svc() {
@@ -280,13 +337,11 @@ show_stats() {
 import sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
 q = lambda s: db.execute(s).fetchall()
-total = q("SELECT COUNT(*) FROM playlists")[0][0]
-synced = q("SELECT COUNT(*) FROM playlists WHERE snapshot_id IS NOT NULL")[0][0]
-print(f"Playlists fully synced : {synced} / {total}")
-print(f"Tracks sent            : {q('SELECT COUNT(*) FROM tracks')[0][0]}")
-print(f"Unique files cached    : {q('SELECT COUNT(*) FROM files')[0][0]}")
-print(f"Failed, will retry     : {q('SELECT COUNT(*) FROM failed WHERE attempts < 3')[0][0]}")
-print(f"Failed, gave up        : {q('SELECT COUNT(*) FROM failed WHERE attempts >= 3')[0][0]}")
+print(f"Playlists (topics created) : {q('SELECT COUNT(*) FROM playlists WHERE topic_id IS NOT NULL')[0][0]}")
+print(f"Tracks sent                : {q('SELECT COUNT(*) FROM tracks')[0][0]}")
+print(f"Unique files cached        : {q('SELECT COUNT(*) FROM files')[0][0]}")
+print(f"Failed, will retry         : {q('SELECT COUNT(*) FROM failed WHERE attempts < 3')[0][0]}")
+print(f"Failed, gave up            : {q('SELECT COUNT(*) FROM failed WHERE attempts >= 3')[0][0]}")
 print()
 rows = q("""SELECT p.name, COUNT(t.track_id) FROM playlists p
             LEFT JOIN tracks t ON t.playlist_id = p.playlist_id
@@ -302,11 +357,10 @@ retry_failed() {
 import sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
 db.execute("DELETE FROM failed")
-db.execute("UPDATE playlists SET snapshot_id = NULL")
 db.commit()
 PY
-  ok "Failed list cleared; all playlists will be re-checked on the next cycle"
-  systemctl restart "$SERVICE" 2>/dev/null && ok "Service restarted"
+  ok "Failed list cleared; those tracks will be retried on the next cycle"
+  restart_if_running
 }
 
 health_check() {
@@ -318,13 +372,13 @@ health_check() {
   fi
 
   local p v
-  for p in aiogram spotipy yt-dlp; do
+  for p in aiogram aiohttp yt-dlp; do
     v="$("$VENV/bin/python" -c "import importlib.metadata as m; print(m.version('$p'))" 2>/dev/null)" \
       && ok "$p $v" || err "$p is missing (menu: Update)"
   done
 
   local k
-  for k in BOT_TOKEN CHAT_ID SPOTIPY_CLIENT_ID SPOTIPY_CLIENT_SECRET; do
+  for k in BOT_TOKEN CHAT_ID; do
     if [ -n "$(get_env "$k")" ]; then ok "$k is set"; else err "$k is empty (menu: Edit settings)"; fi
   done
 
@@ -338,23 +392,26 @@ health_check() {
   if systemctl is-enabled --quiet "$SERVICE" 2>/dev/null; then ok "Autostart on boot: enabled"; else warn "Autostart on boot: disabled"; fi
 
   local u code
-  for u in "https://api.telegram.org" "https://accounts.spotify.com" "https://www.youtube.com"; do
+  for u in "https://api.telegram.org" "https://open.spotify.com" "https://www.youtube.com"; do
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$u")"
     if [ "$code" != "000" ]; then ok "Reachable: $u (HTTP $code)"; else err "Unreachable: $u"; fi
   done
 
   check_telegram
 
-  if [ -f "$APP_DIR/.spotify_cache" ]; then
-    local out
-    out="$(cd "$APP_DIR" && timeout 40 "$VENV/bin/python" bot.py auth </dev/null 2>&1)"
-    if echo "$out" | grep -q "logged in as"; then
-      ok "Spotify: $(echo "$out" | grep 'logged in as' | sed 's/^OK, //')"
+  local n first out
+  n="$(pl_ids | wc -l)"
+  if [ "$n" -gt 0 ]; then
+    ok "Playlists configured: $n"
+    first="$(pl_ids | head -n1)"
+    if out="$(cd "$APP_DIR" && timeout 40 "$VENV/bin/python" bot.py info "$first" 2>&1)"; then
+      IFS=$'\t' read -r _ name cnt <<<"$out"
+      ok "Spotify: can read playlists without login (\"$name\", $cnt tracks)"
     else
-      err "Spotify token invalid (menu: Spotify login)"
+      err "Spotify: cannot read playlist $first - $out"
     fi
   else
-    err "Spotify not authorized yet (menu: Spotify login)"
+    err "No playlists added (menu: Manage playlists)"
   fi
 
   ok "Disk: $(df -h "$APP_DIR" | awk 'NR==2 {print $4 " free of " $2}')"
@@ -375,7 +432,7 @@ do_uninstall() {
   rm -f "$UNIT" "$CLI"
   systemctl daemon-reload
   ok "Service removed"
-  if yes_no "Also delete $APP_DIR (settings, Spotify login and database)?" n; then
+  if yes_no "Also delete $APP_DIR (settings, playlist list and database)?" n; then
     rm -rf "$APP_DIR"
     ok "Files deleted"
   else
@@ -404,14 +461,14 @@ menu_loop() {
     echo " 1) Install / reinstall"
     echo " 2) Update from GitHub"
     echo " 3) Edit settings"
-    echo " 4) Spotify login"
+    echo " 4) Manage playlists"
     echo " 5) Start"
     echo " 6) Stop"
     echo " 7) Restart"
     echo " 8) Health check"
     echo " 9) Live logs"
     echo "10) Statistics"
-    echo "11) Retry failed tracks / force resync"
+    echo "11) Retry failed tracks"
     echo "12) Update yt-dlp"
     echo "13) Uninstall"
     echo " 0) Exit"
@@ -422,7 +479,7 @@ menu_loop() {
       1)  do_install; pause;;
       2)  do_update; pause;;
       3)  is_installed && configure || err "Install first"; pause;;
-      4)  spotify_login; pause;;
+      4)  manage_playlists;;
       5)  svc start; pause;;
       6)  svc stop; pause;;
       7)  svc restart; pause;;
@@ -447,7 +504,7 @@ main() {
     logs)     follow_logs;;
     stats)    show_stats;;
     start|stop|restart) svc "$1";;
-    login)    spotify_login;;
+    playlists) manage_playlists;;
     uninstall) do_uninstall;;
     menu|*)   menu_loop;;
   esac
