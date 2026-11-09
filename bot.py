@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import colorsys
 import json
 import logging
 import os
@@ -68,7 +69,7 @@ db = sqlite3.connect(DB_PATH)
 db.executescript(
     """
     CREATE TABLE IF NOT EXISTS playlists (
-        playlist_id TEXT PRIMARY KEY, topic_id INTEGER, name TEXT);
+        playlist_id TEXT PRIMARY KEY, topic_id INTEGER, name TEXT, cover_sent INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS tracks (
         playlist_id TEXT, track_id TEXT, message_id INTEGER,
         PRIMARY KEY (playlist_id, track_id));
@@ -78,6 +79,10 @@ db.executescript(
         PRIMARY KEY (playlist_id, track_id));
     """
 )
+try:  # databases created by older versions have no cover_sent column
+    db.execute("ALTER TABLE playlists ADD COLUMN cover_sent INTEGER DEFAULT 0")
+except sqlite3.OperationalError:
+    pass
 db.commit()
 
 
@@ -132,7 +137,20 @@ def parse_embed(html: str) -> dict:
             }
         )
     name = (ent.get("title") or ent.get("name") or "Playlist").strip()
-    return {"name": name, "tracks": tracks}
+
+    # playlist cover: biggest image up to 640px, from coverArt or visualIdentity
+    images: list[dict] = []
+    for src in ((ent.get("coverArt") or {}).get("sources"), (ent.get("visualIdentity") or {}).get("image")):
+        if src:
+            images = src
+            break
+    images = [i for i in images if i.get("url")]
+    best = max(images, key=lambda i: min(i.get("maxWidth") or i.get("width") or 0, 640), default=None)
+    cover_url = best["url"] if best else None
+
+    bg = (ent.get("visualIdentity") or {}).get("backgroundBase") or {}
+    color = (bg["red"], bg["green"], bg["blue"]) if {"red", "green", "blue"} <= bg.keys() else None
+    return {"name": name, "tracks": tracks, "cover_url": cover_url, "color": color}
 
 
 async def fetch_playlist(session: aiohttp.ClientSession, pid: str) -> dict:
@@ -242,23 +260,91 @@ async def send_track(bot: Bot, topic_id: int, track: dict, session: aiohttp.Clie
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-async def ensure_topic(bot: Bot, pid: str, name: str) -> int:
-    row = db.execute("SELECT topic_id, name FROM playlists WHERE playlist_id=?", (pid,)).fetchone()
+# Telegram does not allow custom images as topic icons, only one of these 6 colors
+# (or a custom emoji). We pick the color closest in hue to the playlist cover.
+TOPIC_COLORS = [0x6FB9F0, 0xFFD67E, 0xCB86DB, 0x8EEE98, 0xFF93B2, 0xFB6F5F]
+
+
+def pick_topic_color(rgb: tuple | None) -> int | None:
+    if not rgb:
+        return None
+    h, s, _ = colorsys.rgb_to_hsv(*(c / 255 for c in rgb))
+    if s < 0.15:  # greyish cover: keep the default blue
+        return TOPIC_COLORS[0]
+
+    def hue(c: int) -> float:
+        return colorsys.rgb_to_hsv((c >> 16 & 255) / 255, (c >> 8 & 255) / 255, (c & 255) / 255)[0]
+
+    def dist(c: int) -> float:
+        d = abs(hue(c) - h)
+        return min(d, 1 - d)
+
+    return min(TOPIC_COLORS, key=dist)
+
+
+async def fetch_image(session: aiohttp.ClientSession, url: str) -> bytes | None:
+    try:
+        async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=20)) as r:
+            return await r.read() if r.status == 200 else None
+    except Exception:
+        return None
+
+
+async def send_cover(bot: Bot, session: aiohttp.ClientSession, pid: str, topic_id: int, data: dict) -> None:
+    """Post the playlist cover as the first (pinned) message of its topic."""
+    img = await fetch_image(session, data["cover_url"]) if data.get("cover_url") else None
+    caption = f"{data['name']}\nhttps://open.spotify.com/playlist/{pid}"
+    try:
+        if img:
+            msg = await tg_call(
+                lambda: bot.send_photo(
+                    CHAT_ID, BufferedInputFile(img, "cover.jpg"), message_thread_id=topic_id, caption=caption
+                )
+            )
+        else:
+            msg = await tg_call(lambda: bot.send_message(CHAT_ID, caption, message_thread_id=topic_id))
+    except TelegramBadRequest as e:
+        log.warning("cover not sent for %s: %s", data["name"], e)
+        return
+    try:
+        await tg_call(lambda: bot.pin_chat_message(CHAT_ID, msg.message_id, disable_notification=True))
+    except Exception as e:  # pinning is optional (needs the Pin Messages admin right)
+        log.warning("could not pin cover: %s", e)
+    db.execute("UPDATE playlists SET cover_sent=1 WHERE playlist_id=?", (pid,))
+    db.commit()
+
+
+async def ensure_topic(bot: Bot, pid: str, data: dict, session: aiohttp.ClientSession) -> int:
+    name = data["name"]
+    row = db.execute(
+        "SELECT topic_id, name, cover_sent FROM playlists WHERE playlist_id=?", (pid,)
+    ).fetchone()
     if row and row[0]:
+        topic_id = row[0]
         if row[1] != name:  # playlist was renamed on Spotify
             try:
-                await tg_call(lambda: bot.edit_forum_topic(CHAT_ID, row[0], name=name[:128]))
+                await tg_call(lambda: bot.edit_forum_topic(CHAT_ID, topic_id, name=name[:128]))
             except TelegramBadRequest as e:
                 log.warning("topic rename failed: %s", e)
             db.execute("UPDATE playlists SET name=? WHERE playlist_id=?", (name, pid))
             db.commit()
-        return row[0]
-    topic = await tg_call(lambda: bot.create_forum_topic(CHAT_ID, name[:128] or "Playlist"))
+        if not row[2]:  # topics created before covers existed
+            await send_cover(bot, session, pid, topic_id, data)
+            await asyncio.sleep(SEND_DELAY)
+        return topic_id
+
+    kwargs = {}
+    color = pick_topic_color(data.get("color"))
+    if color:
+        kwargs["icon_color"] = color
+    topic = await tg_call(lambda: bot.create_forum_topic(CHAT_ID, name[:128] or "Playlist", **kwargs))
     db.execute(
-        "INSERT OR REPLACE INTO playlists (playlist_id, topic_id, name) VALUES (?,?,?)",
+        "INSERT OR REPLACE INTO playlists (playlist_id, topic_id, name, cover_sent) VALUES (?,?,?,0)",
         (pid, topic.message_thread_id, name),
     )
     db.commit()
+    await asyncio.sleep(SEND_DELAY)
+    await send_cover(bot, session, pid, topic.message_thread_id, data)
     await asyncio.sleep(SEND_DELAY)
     return topic.message_thread_id
 
@@ -267,7 +353,7 @@ async def ensure_topic(bot: Bot, pid: str, name: str) -> int:
 async def sync_playlist(bot: Bot, pid: str, session: aiohttp.ClientSession) -> None:
     data = await fetch_playlist(session, pid)
     name, tracks = data["name"], data["tracks"]
-    topic_id = await ensure_topic(bot, pid, name)
+    topic_id = await ensure_topic(bot, pid, data, session)
 
     done = {r[0] for r in db.execute("SELECT track_id FROM tracks WHERE playlist_id=?", (pid,))}
     todo = [t for t in tracks if t["id"] not in done]
