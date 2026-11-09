@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Spotigram - installer & management menu
 # One-line install:
-#   sudo bash <(curl -fsSL https://raw.githubusercontent.com/amirebi9156/spotigram/main/install.sh)
+#   curl -fsSL -o /tmp/spotigram-install.sh https://raw.githubusercontent.com/amirebi9156/spotigram/main/install.sh && sudo bash /tmp/spotigram-install.sh
+# (as root you can drop sudo; do not use "sudo bash <(curl ...)", sudo closes the <(...) pipe)
 # After install, just run:  sudo spotigram
 set -u
 

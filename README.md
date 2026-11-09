@@ -7,7 +7,7 @@ Mirror your Spotify playlists into a Telegram group: one topic per playlist, eve
 ## One-line install
 
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/amirebi9156/spotigram/main/install.sh)
+curl -fsSL -o /tmp/spotigram-install.sh https://raw.githubusercontent.com/amirebi9156/spotigram/main/install.sh && sudo bash /tmp/spotigram-install.sh
 ```
 
 After installing, open the management menu any time with:
