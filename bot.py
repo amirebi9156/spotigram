@@ -91,6 +91,7 @@ async def main() -> None:
             BotCommand(command="playlists", description="Show / add playlists"),
             BotCommand(command="addplaylist", description="Add a Spotify playlist"),
             BotCommand(command="artists", description="Artists I follow"),
+            BotCommand(command="status", description="Bot health and failed songs"),
             BotCommand(command="lyrics", description="Lyrics of the song you reply to"),
         ]
         await bot.set_my_commands(cmds, scope=BotCommandScopeAllGroupChats())

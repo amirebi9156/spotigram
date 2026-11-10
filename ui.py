@@ -6,9 +6,9 @@ Works both inside the group (commands/buttons) and in a private chat with the bo
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import html
 import math
+import re
 import secrets
 import shutil
 import tempfile
@@ -23,6 +23,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, Message,
 )
 
+import health
 import music
 import playlists
 import releases
@@ -58,8 +59,9 @@ def mmss(sec: int) -> str:
     return f"{sec // 60}:{sec % 60:02d}"
 
 
-def B(text: str, data: str | None = None, url: str | None = None) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=text, callback_data=data, url=url)
+def B(text: str, data: str | None = None, url: str | None = None, style: str | None = None) -> InlineKeyboardButton:
+    """style: 'primary' (blue), 'success' (green), 'danger' (red); older clients just ignore it."""
+    return InlineKeyboardButton(text=text, callback_data=data, url=url, style=style)
 
 
 def KB(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
@@ -134,83 +136,177 @@ def remember(tracks: list[dict]) -> None:
 # ----------------------------------------------------------------- screens
 def main_menu() -> tuple[str, InlineKeyboardMarkup]:
     return (
-        "🎧 <b>Spotigram</b>\nWhat do you want to do?",
+        "🎧 <b>Spotigram</b>\n<blockquote>Your music, in Telegram.</blockquote>",
         KB([
-            [B("🎵 Playlists", "m:pl"), B("🎤 Artists", "m:ar")],
-            [B("🔎 Search songs / artists", "m:se")],
-            [B("📝 Lyrics help", "m:ly"), B("ℹ️ Status", "m:st")],
+            [B("🔎  Search songs & artists", "m:se", style="primary")],
+            [B("🎵  Playlists", "m:pl"), B("🎤  Artists", "m:ar")],
+            [B("📝  Lyrics", "m:ly"), B("📊  Status", "m:st")],
         ]),
     )
 
 
 def playlists_screen(admin: bool) -> tuple[str, InlineKeyboardMarkup]:
     rows = playlists.playlist_overview()
-    lines = ["🎵 <b>Playlists</b> (each one is a topic in the group)"]
+    lines = ["🎵 <b>Playlists</b>", "<blockquote>Each playlist is a topic in the group.</blockquote>"]
     if not rows:
-        lines.append("\nNo playlists yet.")
+        lines.append("Nothing here yet.")
     for r in rows:
         link = topic_link(r["topic_id"])
         name = esc(r["name"])
-        lines.append(f"• {f'<a href=\"{link}\">{name}</a>' if link else name} — {r['tracks']} songs")
-    kb_rows = [[B("➕ Add playlist", "pl:add")]]
+        lines.append(f"▫️ {f'<a href=\"{link}\">{name}</a>' if link else name} · {r['tracks']}")
+    kb_rows = [[B("➕  Add playlist", "pl:add", style="success")]] if admin else []
     if admin:
         for r in rows:
-            kb_rows.append([B(f"❌ Remove: {cut(r['name'], 30)}", f"pl:rm:{r['id']}")])
-    kb_rows.append([B("↩ Menu", "m:main")])
+            kb_rows.append([B(f"✖  {cut(r['name'], 32)}", f"pl:rm:{r['id']}", style="danger")])
+    kb_rows.append([B("‹ Menu", "m:main")])
     return "\n".join(lines), KB(kb_rows)
 
 
 def artists_screen(admin: bool) -> tuple[str, InlineKeyboardMarkup]:
     arts = releases.read_artists()
-    lines = ["🎤 <b>Artists I watch for new releases</b>\n(new songs go to the 🆕 New Releases topic)"]
+    lines = ["🎤 <b>Followed artists</b>", "<blockquote>New songs land in the 🆕 New Releases topic.</blockquote>"]
     if not arts:
-        lines.append("\nNo artists yet.")
+        lines.append("Nobody yet. Search an artist and tap Follow.")
     for a in arts:
-        lines.append(f"• {esc(a.name)} — YouTube {len(a.yt)} · SoundCloud {len(a.sc)}")
-    kb_rows = [[B("➕ Find & follow an artist", "m:se")]]
+        lines.append(f"▫️ {esc(a.name)} · YT {len(a.yt)} · SC {len(a.sc)}")
+    kb_rows = [[B("⭐  Find & follow an artist", "m:se", style="success")]]
     if admin:
         for a in arts:
-            kb_rows.append([B(f"❌ Unfollow: {cut(a.name, 30)}", f"ar:rm:{releases.artist_hash(a.name)}")])
-    kb_rows.append([B("↩ Menu", "m:main")])
+            kb_rows.append([B(f"✖  {cut(a.name, 32)}", f"ar:rm:{releases.artist_hash(a.name)}", style="danger")])
+    kb_rows.append([B("‹ Menu", "m:main")])
     return "\n".join(lines), KB(kb_rows)
+
+
+def ago(ts: float | None) -> str:
+    if not ts:
+        return "not yet"
+    s = int(time.time() - ts)
+    return f"{s}s ago" if s < 90 else f"{s // 60} min ago" if s < 5400 else f"{s // 3600} h ago"
+
+
+def status_screen(admin: bool) -> tuple[str, InlineKeyboardMarkup]:
+    q = lambda sql: db.execute(sql).fetchone()[0]
+    failed = q(f"SELECT COUNT(*) FROM failed WHERE attempts >= {playlists.MAX_ATTEMPTS}")
+    bad = health.failing()
+    lines = [
+        "📊 <b>Status</b>",
+        f"<blockquote>Playlists checked {ago(health.LAST_OK.get('playlists'))}\n"
+        f"Releases checked {ago(health.LAST_OK.get('releases'))}\n"
+        f"Running for {ago(health.START).replace(' ago', '')}</blockquote>",
+        f"🎵 {len(playlists.read_playlist_ids())} playlists · {q('SELECT COUNT(*) FROM tracks')} songs sent",
+        f"🎤 {len(releases.read_artists())} artists · {q('SELECT COUNT(*) FROM releases')} new releases sent",
+        f"🎧 {q('SELECT COUNT(*) FROM picks')} songs added from search",
+    ]
+    lines.append(f"{'⚠️' if failed else '✅'} {failed} songs gave up after repeated failures")
+    if bad:
+        lines.append("⚠️ Having trouble: " + ", ".join(f"{esc(k.split(':', 1)[-1])} ×{v}" for k, v in list(bad.items())[:5]))
+    for ts, what in list(health.RECENT)[:3]:
+        lines.append(f"🕘 {ago(ts)}: {esc(what)}")
+    rows = [[B("🩺  Check connections", "st:check")]]
+    if admin:
+        rows.append([B(f"🔁  Retry failed ({failed})", "st:retry", style="primary")])
+    rows.append([B("‹ Menu", "m:main")])
+    return "\n".join(lines), KB(rows)
 
 
 def help_text() -> str:
     return (
         "📝 <b>Lyrics</b>: tap 📝 under a song, reply to it with /lyrics (or the word متن / lyrics), "
         "or /lyrics Artist - Title\n\n"
-        "<b>Commands</b>\n/menu · /search name · /playlists · /addplaylist link · /artists\n"
+        "<b>Commands</b>\n/menu · /search name · /playlists · /addplaylist link · /artists · /status\n"
         "In a private chat with me you can just send an artist or song name, or a Spotify playlist link."
     )
 
 
+async def check_connections() -> list[str]:
+    targets = {
+        "Telegram": "https://api.telegram.org", "Spotify": "https://open.spotify.com",
+        "YouTube": "https://www.youtube.com", "SoundCloud": "https://soundcloud.com",
+        "Lyrics (LRCLIB)": "https://lrclib.net", "Deezer": "https://api.deezer.com/infos",
+    }
+
+    async def one(name: str, url: str) -> str:
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    return f"{'✅' if r.status < 500 else '❌'} {name}"
+        except Exception:
+            return f"❌ {name}"
+
+    out = list(await asyncio.gather(*(one(n, u) for n, u in targets.items())))
+    try:  # can yt-dlp really search YouTube from this server?
+        await asyncio.to_thread(playlists._yt_search, "music", 1)
+        out.append("✅ YouTube search (yt-dlp)")
+    except Exception as e:
+        out.append(f"❌ YouTube search (yt-dlp): {esc(health.hint(str(e)) or cut(str(e), 80))}")
+    return out
+
+
 # ------------------------------------------------------------------ search
+WEB: dict[str, dict] = {}  # YouTube video id -> song info, for the "add from YouTube" buttons
+SEARCHQ: dict[str, str] = {}  # token -> artist name typed by the user (follow without Deezer)
+
+
+def web_song_search(query: str) -> list[dict]:
+    """Blocking: YouTube results that look like songs (used when Deezer has nothing, e.g. Persian names)."""
+    out = []
+    for e in playlists._yt_search(query, 10):
+        dur = e.get("duration") or 0
+        if not e.get("id") or not (60 <= dur <= 720):
+            continue
+        chan = re.sub(r"\s*-\s*topic$", "", (e.get("channel") or e.get("uploader") or ""), flags=re.I).strip()
+        out.append({"yt": e["id"], "title": releases.clean_title(e.get("title") or "", chan) or e.get("title") or "?",
+                    "artist": chan or "?", "duration": int(dur), "cover": f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg"})
+        if len(out) >= 6:
+            break
+    return out
+
+
+def is_non_latin(s: str) -> bool:
+    return any(c.isalpha() and ord(c) > 0x24F for c in s)
+
+
 async def do_search(bot: Bot, m: Message, query: str) -> None:
     arts, trks = await asyncio.gather(music.search_artists(query, 4), music.search_tracks(query, 8))
-    if not arts and not trks:
-        await say(bot, m, f"Nothing found for <b>{esc(query)}</b>.", KB([[B("↩ Menu", "m:main")]]))
+    web: list[dict] = []
+    # Deezer is weak for many Persian / non-Latin names: also look on YouTube directly
+    if is_non_latin(query) or not arts or not trks:
+        try:
+            web = await asyncio.to_thread(web_song_search, query)
+        except Exception as e:
+            log.warning("web search failed: %s", e)
+    if not arts and not trks and not web:
+        await say(bot, m, f"Nothing found for <b>{esc(query)}</b>.", KB([[B("‹ Menu", "m:main")]]))
         return
     remember(trks)
-    rows = [[B(f"🎤 {cut(a['name'], 34)} · {a['fans']:,} fans", f"a:{a['id']}")] for a in arts]
+    rows = [[B(f"🎤  {cut(a['name'], 32)} · {a['fans']:,}", f"a:{a['id']}", style="primary")] for a in arts]
     rows += [
-        [B(f"➕ {cut(t['artist'] + ' — ' + t['title'], 44)} ({mmss(t['duration'])})", f"t:{t['id']}")]
+        [B(f"＋  {cut(t['artist'] + ' — ' + t['title'], 42)} · {mmss(t['duration'])}", f"t:{t['id']}")]
         for t in trks
     ]
-    rows.append([B("↩ Menu", "m:main")])
-    await say(
-        bot, m,
-        f"🔎 <b>{esc(query)}</b>\nTap an artist to browse songs / follow, or a song to add it to the group.",
-        KB(rows),
-    )
+    if web:
+        for w in web:
+            WEB[w["yt"]] = w
+        if len(WEB) > 500:
+            for k in list(WEB)[:250]:
+                WEB.pop(k, None)
+        rows += [[B(f"▶️  {cut(w['artist'] + ' — ' + w['title'], 40)} · {mmss(w['duration'])}", f"w:{w['yt']}")] for w in web]
+    if not arts and await is_admin(bot, m.from_user.id):
+        token = secrets.token_hex(3)
+        SEARCHQ[token] = query.strip()[:60]
+        rows.append([B(f"⭐  Follow “{cut(query.strip(), 26)}” for new songs", f"fq:{token}", style="success")])
+    rows.append([B("‹ Menu", "m:main")])
+    note = "\n<blockquote>▶️ = found on YouTube directly</blockquote>" if web else ""
+    await say(bot, m, f"🔎 <b>{esc(query)}</b>{note}", KB(rows))
 
 
 def artist_screen(a: dict) -> tuple[str, InlineKeyboardMarkup]:
-    text = f"🎤 <b>{esc(a['name'])}</b>\n{a['fans']:,} fans · {a['albums']} albums"
+    text = f"🎤 <b>{esc(a['name'])}</b>\n<blockquote>{a['fans']:,} fans · {a['albums']} albums</blockquote>"
     rows = [
-        [B("✅ Following (new releases)" if followed(a["name"]) else "⭐ Follow (auto-send new releases)",
-           "noop" if followed(a["name"]) else f"f:{a['id']}")],
-        [B("🎵 Top songs", f"at:{a['id']}:0"), B("💿 Albums", f"ab:{a['id']}:0")],
-        [B("↩ Menu", "m:main")],
+        [B("✅  Following" if followed(a["name"]) else "⭐  Follow · auto-send new songs",
+           "noop" if followed(a["name"]) else f"f:{a['id']}", style=None if followed(a["name"]) else "success")],
+        [B("🎵  Top songs", f"at:{a['id']}:0"), B("💿  Albums", f"ab:{a['id']}:0")],
+        [B("‹ Menu", "m:main")],
     ]
     return text, KB(rows)
 
@@ -221,20 +317,21 @@ def songs_page(title: str, tracks: list[dict], page: int, prefix: str, kind: str
     page = min(max(page, 0), pages - 1)
     chunk = tracks[page * PER_PAGE:(page + 1) * PER_PAGE]
     remember(chunk)
-    rows = [[B(f"➕ {cut(t['title'], 40)} ({mmss(t['duration'])})", f"t:{t['id']}")] for t in chunk]
+    rows = [[B(f"＋  {cut(t['title'], 38)} · {mmss(t['duration'])}", f"t:{t['id']}")] for t in chunk]
     if pages > 1:
         rows.append(nav(prefix, page, pages))
-    rows.append([B("➕ All on this page", f"ap:{kind}:{ident}:{page}")])
+    rows.append([B("➕  All on this page", f"ap:{kind}:{ident}:{page}", style="success")])
     if kind == "al":
-        rows.append([B(f"➕ Whole album ({len(tracks)})", f"ap:{kind}:{ident}:-1")])
-    rows.append(back + [B("↩ Menu", "m:main")])
-    return f"{title}\nTap a song to add it to the group.", KB(rows)
+        rows.append([B(f"➕  Whole album ({len(tracks)})", f"ap:{kind}:{ident}:-1", style="success")])
+    rows.append(back + [B("‹ Menu", "m:main")])
+    return f"{title}\n<blockquote>Tap a song to add it to the group.</blockquote>", KB(rows)
 
 
 # ------------------------------------------------------------ adding songs
 async def add_song(bot: Bot, tr: dict) -> tuple[str, str]:
     """Returns ('ok'|'dup'|'fail', detail)."""
     key = releases.release_key(tr["artist"], tr["title"])
+    fkey = f"yt:{tr['yt']}" if tr.get("yt") else f"dz:{tr['id']}"
     if db.execute("SELECT 1 FROM picks WHERE key=?", (key,)).fetchone():
         return "dup", PICKS_TOPIC_NAME
     if db.execute("SELECT 1 FROM releases WHERE key=?", (key,)).fetchone():
@@ -243,7 +340,7 @@ async def add_song(bot: Bot, tr: dict) -> tuple[str, str]:
         return "dup", "already being added"
     _adding.add(key)
     try:
-        cached = db.execute("SELECT file_id FROM files WHERE track_id=?", (f"dz:{tr['id']}",)).fetchone()
+        cached = db.execute("SELECT file_id FROM files WHERE track_id=?", (fkey,)).fetchone()
         if cached:
             msg = await send_audio_topic(bot, "picks_topic", PICKS_TOPIC_NAME, 0xFFD67E, cached[0],
                                          reply_markup=lyrics_kb())
@@ -252,7 +349,10 @@ async def add_song(bot: Bot, tr: dict) -> tuple[str, str]:
             try:
                 track = {"artist": tr["artist"], "title": tr["title"], "duration": tr["duration"]}
                 async with dl_lock():
-                    path = await asyncio.to_thread(playlists.download_audio, track, tmp)
+                    if tr.get("yt"):
+                        path = await asyncio.to_thread(playlists.download_video, tr["yt"], tmp)
+                    else:
+                        path = await asyncio.to_thread(playlists.download_audio, track, tmp)
                 img = None
                 if tr.get("cover"):
                     async with aiohttp.ClientSession() as session:
@@ -263,17 +363,19 @@ async def add_song(bot: Bot, tr: dict) -> tuple[str, str]:
                     thumbnail=BufferedInputFile(img, "cover.jpg") if img else None,
                     reply_markup=lyrics_kb(),
                 )
-                db.execute("INSERT OR REPLACE INTO files VALUES (?, ?)", (f"dz:{tr['id']}", msg.audio.file_id))
+                db.execute("INSERT OR REPLACE INTO files VALUES (?, ?)", (fkey, msg.audio.file_id))
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
         db.execute(
             "INSERT OR REPLACE INTO picks (key, dz_id, artist, title) VALUES (?,?,?,?)",
-            (key, tr["id"], tr["artist"], tr["title"]),
+            (key, tr.get("id") or 0, tr["artist"], tr["title"]),
         )
         db.commit()
+        await health.ok(bot, "download", "downloads work again")
         return "ok", ""
     except Exception as e:
         log.warning("add song failed: %s - %s: %s", tr["artist"], tr["title"], e)
+        await health.fail(bot, "download", "Downloads keep failing (songs added from the menu)", str(e), threshold=5)
         return "fail", cut(str(e), 120)
     finally:
         _adding.discard(key)
@@ -369,6 +471,14 @@ async def cmd_playlists(m: Message, bot: Bot) -> None:
     await say(bot, m, text, kb)
 
 
+@router.message(ALLOWED_MSG, Command("status"))
+async def cmd_status(m: Message, bot: Bot) -> None:
+    if not await can_use(bot, m.chat, m.from_user.id):
+        return await deny(m, bot)
+    text, kb = status_screen(await need_admin(bot, m.from_user.id))
+    await say(bot, m, text, kb)
+
+
 @router.message(ALLOWED_MSG, Command("artists"))
 async def cmd_artists(m: Message, bot: Bot) -> None:
     if not await can_use(bot, m.chat, m.from_user.id):
@@ -420,7 +530,7 @@ async def on_private_text(m: Message, bot: Bot) -> None:
         await do_search(bot, m, m.text.strip())
 
 
-CB_PATTERN = r"^(m|pl|ar|a|at|ab|al|ap|t|f|fs|fo|fc|noop)(:|$)"
+CB_PATTERN = r"^(m|pl|ar|a|at|ab|al|ap|t|w|f|fq|fs|fo|fc|st|noop)(:|$)"
 
 
 @router.callback_query(ALLOWED_CB, F.data.regexp(CB_PATTERN))
@@ -432,8 +542,8 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
     if not await can_use(bot, msg.chat, uid):
         return await cb.answer("Join the music group first.", show_alert=True)
     p = (cb.data or "").split(":")
-    cmd = p[0] if len(p) == 1 or p[0] not in ("pl", "ar") else f"{p[0]}:{p[1]}"
-    ADMIN_ONLY = {"pl:add", "pl:rm", "ar:rm", "f", "fs", "fo", "ap"}
+    cmd = p[0] if len(p) == 1 or p[0] not in ("pl", "ar", "st") else f"{p[0]}:{p[1]}"
+    ADMIN_ONLY = {"pl:add", "pl:rm", "ar:rm", "st:retry", "f", "fq", "fs", "fo", "ap"}
     if cmd in ADMIN_ONLY and not await need_admin(bot, uid):
         return await cb.answer("Only group admins can do that.", show_alert=True)
 
@@ -452,19 +562,30 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
             text, kb = artists_screen(await need_admin(bot, uid))
             return await edit(cb, text, kb)
         if what == "ly":
-            return await edit(cb, help_text(), KB([[B("↩ Menu", "m:main")]]))
+            return await edit(cb, help_text(), KB([[B("‹ Menu", "m:main")]]))
         if what == "st":
-            n = lambda q: db.execute(q).fetchone()[0]
-            text = (
-                "ℹ️ <b>Status</b>\n"
-                f"Playlists: {len(playlists.read_playlist_ids())} · songs sent: {n('SELECT COUNT(*) FROM tracks')}\n"
-                f"Artists watched: {len(releases.read_artists())} · new releases sent: {n('SELECT COUNT(*) FROM releases')}\n"
-                f"Songs added by search: {n('SELECT COUNT(*) FROM picks')}"
-            )
-            return await edit(cb, text, KB([[B("↩ Menu", "m:main")]]))
+            text, kb = status_screen(await need_admin(bot, uid))
+            return await edit(cb, text, kb)
         if what == "se":
             return await tg_call(lambda: bot.send_message(
                 msg.chat.id, PROMPT_SEARCH, message_thread_id=_thread(msg), reply_markup=ForceReply()))
+    if cmd == "st:retry":
+        n = db.execute("SELECT COUNT(*) FROM failed").fetchone()[0]
+        db.execute("DELETE FROM failed")
+        db.commit()
+        await cb.answer(f"🔁 Retrying {n} song(s)…")
+
+        async def again() -> None:
+            await playlists.sync_all(bot)
+        spawn(again())
+        text, kb = status_screen(True)
+        return await edit(cb, text, kb)
+    if cmd == "st:check":
+        await cb.answer("🩺 Checking…")
+        await edit(cb, "🩺 Checking connections…")
+        results = await check_connections()
+        text, kb = status_screen(await need_admin(bot, uid))
+        return await edit(cb, "🩺 <b>Connections</b>\n" + "\n".join(results) + "\n\n" + text, kb)
     if cmd == "pl:add":
         await cb.answer()
         return await tg_call(lambda: bot.send_message(
@@ -494,7 +615,7 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
         if cmd == "at":
             a, tracks = await music.artist(ident), await music.artist_top(ident)
             title = f"🎵 <b>{esc(a['name'] if a else '')}</b> — top songs"
-            text, kb = songs_page(title, tracks, page, f"at:{ident}", "at", ident, [B("↩ Artist", f"a:{ident}")])
+            text, kb = songs_page(title, tracks, page, f"at:{ident}", "at", ident, [B("‹ Artist", f"a:{ident}")])
             return await edit(cb, text, kb)
         if cmd == "ab":
             a, albums = await music.artist(ident), await music.artist_albums(ident)
@@ -504,13 +625,13 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
                     for al in albums[page * PER_PAGE:(page + 1) * PER_PAGE]]
             if pages > 1:
                 rows.append(nav(f"ab:{ident}", page, pages))
-            rows.append([B("↩ Artist", f"a:{ident}"), B("↩ Menu", "m:main")])
+            rows.append([B("‹ Artist", f"a:{ident}"), B("‹ Menu", "m:main")])
             return await edit(cb, f"💿 <b>{esc(a['name'] if a else '')}</b> — albums & singles", KB(rows))
         al = await music.album(ident)
         if not al:
             return await cb.answer("Album not found.", show_alert=True)
         title = f"💿 <b>{esc(al['title'])}</b> ({al['year']}) — {esc(al['artist'])}"
-        back = [B("↩ Albums", f"ab:{al['artist_id']}:0")] if al.get("artist_id") else []
+        back = [B("‹ Albums", f"ab:{al['artist_id']}:0")] if al.get("artist_id") else []
         text, kb = songs_page(title, al["tracks"], page, f"al:{ident}", "al", ident, back)
         return await edit(cb, text, kb)
     if cmd == "t":
@@ -535,19 +656,29 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
         return spawn(add_songs_task(bot, msg, tracks))
 
     # ---- follow an artist: pick where to watch, then save
-    if cmd == "f":
-        a = await music.artist(int(p[1]))
-        if not a:
-            return await cb.answer("Artist not found.", show_alert=True)
+    if cmd in ("f", "fq"):
+        if cmd == "f":
+            a = await music.artist(int(p[1]))
+            name = a["name"] if a else None
+        else:
+            name = SEARCHQ.get(p[1])
+        if not name:
+            return await cb.answer("Artist not found. Search again.", show_alert=True)
         await cb.answer("🔎 Looking for channels…")
-        await edit(cb, f"⏳ Looking for <b>{esc(a['name'])}</b> on YouTube and SoundCloud…")
-        cands = await asyncio.to_thread(releases.follow_candidates, a["name"])
+        await edit(cb, f"⏳ Looking for <b>{esc(name)}</b> on YouTube and SoundCloud…")
+        cands = await asyncio.to_thread(releases.follow_candidates, name)
         for k in [k for k, v in PENDING.items() if time.time() - v["ts"] > 1800]:
             PENDING.pop(k, None)
         token = secrets.token_hex(3)
-        PENDING[token] = {"name": a["name"], "cands": cands, "ts": time.time()}
+        PENDING[token] = {"name": name, "cands": cands, "ts": time.time()}
         text, kb = follow_screen(token)
         return await edit(cb, text, kb)
+    if cmd == "w":
+        w = WEB.get(p[1])
+        if not w:
+            return await cb.answer("Search again, this result expired.", show_alert=True)
+        await cb.answer("⏳ Adding… I'll tell you when it's in the group.")
+        return spawn(add_songs_task(bot, msg, [w]))
     if cmd in ("fs", "fo", "fc"):
         st = PENDING.get(p[1])
         if not st:
@@ -574,19 +705,20 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
             f"⭐ Following <b>{esc(st['name'])}</b> on {len(picks)} source(s).\n"
             f"New songs will appear in <b>{esc(releases.RELEASES_TOPIC_NAME)}</b> "
             "(songs that already exist are ignored; checks run every few minutes).",
-            KB([[B("↩ Menu", "m:main")]]),
+            KB([[B("‹ Menu", "m:main")]]),
         )
     await cb.answer()
 
 
 def follow_screen(token: str) -> tuple[str, InlineKeyboardMarkup]:
     st = PENDING[token]
-    head = f"⭐ Follow <b>{esc(st['name'])}</b>\nWhere should I watch for new songs? Tap to toggle (✅ = watched), then Save."
+    head = (f"⭐ <b>{esc(st['name'])}</b>\n<blockquote>Where should I watch for new songs? "
+            "Tap to toggle, then Save. An “- Topic” YouTube channel is usually the fastest.</blockquote>")
     if not st["cands"]:
-        return head + "\n\nI could not find channels automatically.", KB([[B("✖ Cancel", f"fc:{token}")]])
+        return head + "\n\nI could not find channels automatically.", KB([[B("✖  Cancel", f"fc:{token}", style="danger")]])
     rows = []
     for i, c in enumerate(st["cands"]):
         site = "YouTube" if c["platform"] == "yt" else "SoundCloud"
-        rows.append([B(f"{'✅' if c['on'] else '⬜'} {site}: {cut(c['label'], 40)}", f"fs:{token}:{i}")])
-    rows.append([B("💾 Save", f"fo:{token}"), B("✖ Cancel", f"fc:{token}")])
+        rows.append([B(f"{'✅' if c['on'] else '⬜'}  {site} · {cut(c['label'], 38)}", f"fs:{token}:{i}")])
+    rows.append([B("💾  Save", f"fo:{token}", style="success"), B("✖  Cancel", f"fc:{token}", style="danger")])
     return head, KB(rows)

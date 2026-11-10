@@ -25,6 +25,7 @@ from core import (
     AUDIO_FMT_YT, CHAT_ID, HEADERS, PLAYLISTS_FILE, SEND_DELAY, SYNC_INTERVAL,
     db, dl_lock, fetch_image, log, lyrics_kb, tg_call, ytdlp_opts,
 )
+import health
 
 DURATION_TOLERANCE = 20  # seconds allowed between Spotify and YouTube duration
 MAX_ATTEMPTS = 3
@@ -126,27 +127,80 @@ async def fetch_track_cover(session: aiohttp.ClientSession, track_id: str) -> by
 
 
 # ---------------------------------------------------------------- download
-def download_audio(track: dict, outdir: str) -> str:
-    """Search YouTube, pick the closest duration match, download m4a (no ffmpeg needed)."""
-    query = f"{track['artist']} {track['title']}"
+_BAD_WORDS = (
+    "live", "remix", "sped up", "speed up", "slowed", "reverb", "nightcore", "cover", "karaoke",
+    "instrumental", "8d", "bass boosted", "reaction", "mashup", "acapella", "a cappella", "tutorial",
+    "lesson", "piano version", "acoustic", "extended", "loop", "1 hour", "تیزر", "ریمیکس", "کاور",
+)
+
+
+def _n(s: str) -> str:
+    return re.sub(r"\W+", "", (s or "").lower())
+
+
+def rank_candidates(track: dict, entries: list[dict]) -> list[tuple[float, dict]]:
+    """Score YouTube results for a wanted track. Higher = better; rejected ones are dropped."""
+    want_t, want_a = _n(track["title"]), _n(track["artist"].split(",")[0])
+    wanted_text = (track["title"] + " " + track["artist"]).lower()
+    out = []
+    for e in entries:
+        if not e or not e.get("id"):
+            continue
+        dur, title, chan = e.get("duration"), (e.get("title") or ""), (e.get("channel") or e.get("uploader") or "")
+        tl, cl = title.lower(), chan.lower()
+        score = 0.0
+        if dur and track.get("duration"):
+            d = abs(dur - track["duration"])
+            if d > DURATION_TOLERANCE:
+                continue
+            score -= d * 1.5
+        elif dur and dur > 900:
+            continue
+        for w in _BAD_WORDS:
+            if re.search(r"(?<!\w)%s(?!\w)" % re.escape(w), tl) and w not in wanted_text:
+                score -= 40
+        if cl.endswith("- topic"):
+            score += 25
+        if "vevo" in cl:
+            score += 10
+        if want_a and want_a in _n(chan):
+            score += 15
+        if want_a and want_a in _n(title):
+            score += 5
+        score += 20 if want_t and want_t in _n(title) else -30
+        if "official audio" in tl or "(audio)" in tl:
+            score += 8
+        out.append((score, e))
+    return sorted(out, key=lambda x: -x[0])
+
+
+def _yt_search(query: str, n: int) -> list[dict]:
     with yt_dlp.YoutubeDL(ytdlp_opts(noplaylist=True, extract_flat=True)) as ydl:
-        entries = ydl.extract_info(f"ytsearch5:{query}", download=False).get("entries") or []
+        return ydl.extract_info(f"ytsearch{n}:{query}", download=False).get("entries") or []
 
-    def diff(e: dict) -> float:
-        return abs(e["duration"] - track["duration"]) if e.get("duration") else 999
 
-    entries = [e for e in entries if e and e.get("id")]
-    if not entries:
-        raise RuntimeError("no search results")
-    best = min(entries, key=diff)
-    if track["duration"] and diff(best) > DURATION_TOLERANCE:
-        raise RuntimeError(f"no close duration match (best diff {diff(best):.0f}s)")
+def pick_youtube(track: dict) -> str:
+    """Returns the best YouTube video id for the track (searches up to twice)."""
+    first = f"{track['artist']} {track['title']}"
+    ranked = rank_candidates(track, _yt_search(first, 10))
+    if not ranked or ranked[0][0] < 0:
+        ranked = sorted(ranked + rank_candidates(track, _yt_search(first + " official audio", 8)), key=lambda x: -x[0])
+    if not ranked:
+        raise RuntimeError("no matching result on YouTube (title/duration did not fit)")
+    return ranked[0][1]["id"]
 
+
+def download_audio(track: dict, outdir: str) -> str:
+    """Find the best YouTube match and download it as m4a (no ffmpeg needed)."""
+    return download_video(pick_youtube(track), outdir)
+
+
+def download_video(video_id: str, outdir: str) -> str:
     opts = ytdlp_opts(
         noplaylist=True, format=AUDIO_FMT_YT, outtmpl=os.path.join(outdir, "%(id)s.%(ext)s")
     )
     with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(f"https://www.youtube.com/watch?v={best['id']}", download=True)
+        info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=True)
         return ydl.prepare_filename(info)
 
 
@@ -331,6 +385,7 @@ async def _sync_playlist(bot: Bot, pid: str, session: aiohttp.ClientSession) -> 
             db.execute("DELETE FROM failed WHERE playlist_id=? AND track_id=?", (pid, t["id"]))
             db.commit()
             log.info("sent: %s - %s", t["artist"], t["title"])
+            await health.ok(bot, "download", "downloads work again")
         except TelegramBadRequest as e:
             if "thread" in str(e).lower():
                 # topic was deleted in Telegram: forget it and resend everything next cycle
@@ -342,6 +397,7 @@ async def _sync_playlist(bot: Bot, pid: str, session: aiohttp.ClientSession) -> 
             raise
         except Exception as e:
             log.warning("failed: %s - %s (%s)", t["artist"], t["title"], e)
+            await health.fail(bot, "download", "Downloads keep failing (playlists)", str(e), threshold=5)
             attempts = (fr[0] if fr else 0) + 1
             db.execute("INSERT OR REPLACE INTO failed VALUES (?,?,?)", (pid, t["id"], attempts))
             db.commit()
@@ -359,7 +415,11 @@ async def sync_all(bot: Bot) -> None:
                 await sync_playlist(bot, pid, session)
             except Exception as e:
                 log.error("playlist %s failed: %s", pid, e)
+                await health.fail(bot, f"pl:{pid}", f"Cannot read Spotify playlist {pid} (is it still Public?)", str(e), threshold=3)
+            else:
+                await health.ok(bot, f"pl:{pid}", f"playlist {pid} readable again")
             await asyncio.sleep(1)
+    health.mark_cycle("playlists")
 
 
 async def sync_loop(bot: Bot) -> None:

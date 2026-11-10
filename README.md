@@ -20,9 +20,14 @@ Works in the group and in a private chat with the bot (DM only for members of th
 | `/search name` | Search a song or artist (DM: just type the name) |
 | `/playlists`, `/addplaylist link` | List / add playlists (DM: paste a Spotify link). Admins only for add/remove |
 | `/artists` | Artists you follow for new releases |
+| `/status` | Health, failed songs, connection check, **Retry failed** (admins) |
 | `/lyrics` | Lyrics of the song you reply to |
 
 Search shows matching artists and songs (metadata from Deezer's public API). Tap a song to add it to the `🎧 Picks` topic, or open an artist to see top songs and albums (add one song, a page, or a whole album), or tap **Follow** to pick their YouTube / SoundCloud sources; new songs then go to `🆕 New Releases` automatically. Adding playlists in bulk, following and removing are admin-only.
+
+**Alerts**: when something keeps failing (YouTube blocking the server, 5 failed downloads in a row, a Spotify playlist that is no longer Public, a broken artist source) group admins get a message with a suggested fix, and another when it recovers. Admins must press /start in a private chat with the bot to receive them by DM; otherwise they are posted in the group.
+
+**Persian / non-Latin names**: when Deezer has little or nothing, search also lists YouTube results directly (▶️) and offers to follow the typed name.
 
 ## One-line install
 

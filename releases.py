@@ -26,6 +26,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import BufferedInputFile, FSInputFile
 
+import health
 from core import (
     ARTISTS_FILE, AUDIO_FMT_SC, AUDIO_FMT_YT, CHAT_ID, HEADERS, RELEASE_INTERVAL,
     RELEASE_MAX_AGE_HOURS, RELEASE_MAX_ATTEMPTS, RELEASE_MAX_SECONDS, RELEASE_MIN_SECONDS,
@@ -74,6 +75,16 @@ def read_artists() -> list[Artist]:
         if art.name and (art.yt or art.sc):
             out.append(art)
     return out
+
+
+def drop_source(name: str, platform: str, sid: str) -> None:
+    arts = read_artists()
+    for a in arts:
+        if a.name == name:
+            lst = a.yt if platform == "yt" else a.sc
+            if sid in lst:
+                lst.remove(sid)
+    write_artists([a for a in arts if a.yt or a.sc])
 
 
 def write_artists(artists: list[Artist]) -> None:
@@ -282,11 +293,13 @@ async def process_item(bot: Bot, session: aiohttp.ClientSession, artist: Artist,
             mark_seen(iid)
             return
         await send_release(bot, session, artist, item, info, title)
+        await health.ok(bot, "download", "downloads work again")
         mark_seen(iid)
         await asyncio.sleep(1)
     except Exception as e:
         n = bump_attempts(iid)
         log.warning("release '%s' failed (%d/%d): %s", item["title"], n, RELEASE_MAX_ATTEMPTS, e)
+        await health.fail(bot, "download", "Downloads keep failing (new releases)", str(e), threshold=5)
         if n >= RELEASE_MAX_ATTEMPTS:
             mark_seen(iid)
 
@@ -306,16 +319,27 @@ async def release_cycle(bot: Bot, session: aiohttp.ClientSession) -> None:
                 return artist, platform, sid, await asyncio.to_thread(fetch_sc_sync, sid)
             except Exception as e:
                 log.warning("%s %s (%s): %s", PLATFORM_NAME[platform], sid, artist.name, e)
+                err = str(e)
+                if platform == "sc" and ("404" in err or "not found" in err.lower()):
+                    if await health.fail(bot, f"src:sc:{sid}", f"SoundCloud profile “{sid}” of {artist.name} does not exist", err, threshold=5):
+                        drop_source(artist.name, "sc", sid)
+                        await health.alert(bot, f"🧹 Removed the broken SoundCloud source “{sid}” for {artist.name}. Re-follow the artist from /search to add the right profile.")
+                else:
+                    await health.fail(bot, f"src:{platform}:{sid}", f"Cannot check {PLATFORM_NAME[platform]} source {sid} ({artist.name})", err, threshold=5)
                 return artist, platform, sid, None
 
     jobs = [fetch(a, "yt", c) for a in artists for c in a.yt]
-    jobs += [fetch(a, "sc", s) for a in artists for s in a.sc]
+    jobs += [fetch(a, "sc", s) for a in artists for s in a.sc if s not in ("tracks", "users")]
+    for a in artists:  # earlier versions saved a wrong profile name "tracks"
+        if "tracks" in a.sc or "users" in a.sc:
+            drop_source(a.name, "sc", "tracks"); drop_source(a.name, "sc", "users")
     results = await asyncio.gather(*jobs)
 
     candidates: list[tuple[Artist, dict]] = []
     for artist, platform, sid, items in results:
         if items is None:
             continue
+        await health.ok(bot, f"src:{platform}:{sid}", f"{PLATFORM_NAME[platform]} source {sid} ({artist.name}) works again")
         src = f"{platform}:{sid}"
         if db.execute("SELECT 1 FROM source_state WHERE src=?", (src,)).fetchone() is None:
             # first time we see this source: remember what exists, send nothing
@@ -327,6 +351,7 @@ async def release_cycle(bot: Bot, session: aiohttp.ClientSession) -> None:
             continue
         candidates += [(artist, it) for it in items if not is_seen(f"{it['platform']}:{it['id']}")]
 
+    health.mark_cycle("releases")
     far = datetime.max.replace(tzinfo=timezone.utc)
     candidates.sort(key=lambda c: c[1]["published"] or far)  # oldest first
     for artist, item in candidates:
@@ -372,20 +397,32 @@ def search_youtube_channels(name: str) -> list[dict]:
     return sorted(found.values(), key=lambda c: -c["score"])[:8]
 
 
+def _sc_permalink(e: dict) -> str | None:
+    """Profile permalink of a SoundCloud search hit. The hit's own `url` is an API address
+    (api.soundcloud.com/tracks/123), so the uploader's profile url is used instead."""
+    for key in ("uploader_url", "webpage_url"):
+        u = e.get(key) or ""
+        if "api.soundcloud.com" in u or "api-v2.soundcloud.com" in u:
+            continue
+        parts = [p for p in urlparse(u).path.split("/") if p]
+        if parts and parts[0] not in ("tracks", "users", "playlists", "you", "discover", "search"):
+            return parts[0]
+    up = e.get("uploader_id")
+    return up if isinstance(up, str) and not up.isdigit() else None
+
+
 def search_soundcloud_profiles(name: str) -> list[dict]:
     found: dict[str, dict] = {}
     for e in _flat_search(f"scsearch15:{name}"):
-        url = e.get("url") or e.get("webpage_url") or ""
-        parts = [p for p in urlparse(url).path.split("/") if p]
-        if not parts:
+        perm = _sc_permalink(e)
+        if not perm:
             continue
-        perm = parts[0]
         label = e.get("uploader") or perm
-        c = found.setdefault(perm, {"id": perm, "label": f"{label} (e.g. “{e.get('title') or parts[-1]}”)", "hits": 0})
+        c = found.setdefault(perm, {"id": perm, "label": f"{label} (e.g. “{e.get('title') or '?'}”)", "hits": 0, "uploader": label})
         c["hits"] += 1
     n = _norm(name)
     for perm, c in found.items():
-        c["score"] = c["hits"] + (5 if n and n in _norm(perm + c["label"]) else 0)
+        c["score"] = c["hits"] + (5 if n and n in _norm(perm + c["uploader"]) else 0)
     return sorted(found.values(), key=lambda c: -c["score"])[:8]
 
 
@@ -407,7 +444,7 @@ def resolve_link(text: str) -> tuple[str, str, str] | None:
             print(f"  could not resolve {t}: {e}")
         return None
     m = re.search(r"soundcloud\.com/([^/?#\s]+)", t)
-    if m:
+    if m and m.group(1) not in ("tracks", "users", "you", "discover", "search"):
         return "sc", m.group(1), m.group(1)
     return None
 
