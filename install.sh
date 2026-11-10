@@ -403,7 +403,7 @@ health_check() {
   if systemctl is-enabled --quiet "$SERVICE" 2>/dev/null; then ok "Autostart on boot: enabled"; else warn "Autostart on boot: disabled"; fi
 
   local u code
-  for u in "https://api.telegram.org" "https://open.spotify.com" "https://www.youtube.com" "https://soundcloud.com" "https://lrclib.net"; do
+  for u in "https://api.telegram.org" "https://open.spotify.com" "https://www.youtube.com" "https://soundcloud.com" "https://lrclib.net" "https://api.deezer.com/infos"; do
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$u")"
     if [ "$code" != "000" ]; then ok "Reachable: $u (HTTP $code)"; else err "Unreachable: $u"; fi
   done

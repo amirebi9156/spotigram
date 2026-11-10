@@ -8,7 +8,7 @@ import aiohttp
 from aiogram import Bot
 from aiogram.types import BufferedInputFile, Message, ReplyParameters
 
-from core import CHAT_ID, db, log, tg_call
+from core import db, log, tg_call
 
 API = "https://lrclib.net/api"
 UA = {"User-Agent": "Spotigram/1.0 (https://github.com/amirebi9156/spotigram)"}
@@ -107,7 +107,7 @@ async def deliver(bot: Bot, anchor: Message, artist: str, title: str, duration: 
     async def say(text: str, as_reply: bool = True) -> None:
         await tg_call(
             lambda: bot.send_message(
-                CHAT_ID, text, message_thread_id=thread, reply_parameters=reply if as_reply else None
+                anchor.chat.id, text, message_thread_id=thread, reply_parameters=reply if as_reply else None
             )
         )
 
@@ -135,7 +135,7 @@ async def deliver(bot: Bot, anchor: Message, artist: str, title: str, duration: 
         doc = BufferedInputFile(f"{head}\n\n{text}".encode("utf-8"), f"{shown_artist} - {shown_title}.txt")
         await tg_call(
             lambda: bot.send_document(
-                CHAT_ID, doc, message_thread_id=thread, reply_parameters=reply, caption=head
+                anchor.chat.id, doc, message_thread_id=thread, reply_parameters=reply, caption=head
             )
         )
         return

@@ -271,7 +271,44 @@ async def ensure_topic(bot: Bot, pid: str, data: dict, session: aiohttp.ClientSe
 
 
 # -------------------------------------------------------------------- sync
+_pl_locks: dict[str, asyncio.Lock] = {}
+
+
 async def sync_playlist(bot: Bot, pid: str, session: aiohttp.ClientSession) -> None:
+    """One sync per playlist at a time (the loop and the Telegram menu may both trigger it)."""
+    lock = _pl_locks.setdefault(pid, asyncio.Lock())
+    async with lock:
+        await _sync_playlist(bot, pid, session)
+
+
+def add_playlist_id(pid: str, name: str = "") -> None:
+    p = Path(PLAYLISTS_FILE)
+    old = p.read_text(encoding="utf-8") if p.exists() else ""
+    if pid in read_playlist_ids():
+        return
+    if old and not old.endswith("\n"):
+        old += "\n"
+    p.write_text(old + f"https://open.spotify.com/playlist/{pid}" + (f"  # {name}" if name else "") + "\n", encoding="utf-8")
+
+
+def remove_playlist_id(pid: str) -> None:
+    p = Path(PLAYLISTS_FILE)
+    if not p.exists():
+        return
+    keep = [ln for ln in p.read_text(encoding="utf-8").splitlines() if parse_playlist_id(ln.split("#", 1)[0]) != pid]
+    p.write_text("\n".join(keep) + ("\n" if keep else ""), encoding="utf-8")
+
+
+def playlist_overview() -> list[dict]:
+    out = []
+    for pid in read_playlist_ids():
+        row = db.execute("SELECT name, topic_id FROM playlists WHERE playlist_id=?", (pid,)).fetchone()
+        n = db.execute("SELECT COUNT(*) FROM tracks WHERE playlist_id=?", (pid,)).fetchone()[0]
+        out.append({"id": pid, "name": (row[0] if row and row[0] else pid), "topic_id": row[1] if row else None, "tracks": n})
+    return out
+
+
+async def _sync_playlist(bot: Bot, pid: str, session: aiohttp.ClientSession) -> None:
     data = await fetch_playlist(session, pid)
     name, tracks = data["name"], data["tracks"]
     topic_id = await ensure_topic(bot, pid, data, session)

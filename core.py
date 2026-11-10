@@ -9,7 +9,8 @@ from pathlib import Path
 
 import aiohttp
 import yt_dlp
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram import F, Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
@@ -46,6 +47,7 @@ RELEASES_TOPIC_NAME = _env("RELEASES_TOPIC_NAME", "🆕 New Releases")
 RELEASE_MAX_AGE_HOURS = int(_env("RELEASE_MAX_AGE_HOURS", "72"))  # ignore older uploads
 RELEASE_MIN_SECONDS = int(_env("RELEASE_MIN_SECONDS", "60"))
 RELEASE_MAX_SECONDS = int(_env("RELEASE_MAX_SECONDS", "720"))
+PICKS_TOPIC_NAME = _env("PICKS_TOPIC_NAME", "🎧 Picks")  # songs added from the search menu
 RELEASE_MAX_ATTEMPTS = int(_env("RELEASE_MAX_ATTEMPTS", "20"))
 
 HEADERS = {
@@ -84,6 +86,8 @@ db.executescript(
     CREATE TABLE IF NOT EXISTS source_state (src TEXT PRIMARY KEY);
     CREATE TABLE IF NOT EXISTS attempts (item TEXT PRIMARY KEY, n INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS lyrics_cache (key TEXT PRIMARY KEY, text TEXT);
+    CREATE TABLE IF NOT EXISTS picks (
+        key TEXT PRIMARY KEY, dz_id INTEGER, artist TEXT, title TEXT, added_at TEXT DEFAULT CURRENT_TIMESTAMP);
     """
 )
 try:  # databases created by older versions have no cover_sent column
@@ -118,6 +122,57 @@ async def tg_call(coro_factory):
         except TelegramRetryAfter as e:
             log.warning("flood wait %ss", e.retry_after)
             await asyncio.sleep(e.retry_after + 1)
+
+
+async def topic_id_for(bot: Bot, key: str, name: str, color: int | None = None, force_new: bool = False) -> int:
+    """Topic id stored under meta[key]; creates the topic when missing (or when force_new)."""
+    row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    if row and not force_new:
+        return int(row[0])
+    kw = {"icon_color": color} if color else {}
+    topic = await tg_call(lambda: bot.create_forum_topic(CHAT_ID, name[:128], **kw))
+    db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, str(topic.message_thread_id)))
+    db.commit()
+    return topic.message_thread_id
+
+
+async def send_audio_topic(bot: Bot, key: str, name: str, color: int | None, audio, **kw):
+    """Send audio into a named topic; recreate the topic once if someone deleted it."""
+    for attempt in (1, 2):
+        topic_id = await topic_id_for(bot, key, name, color, force_new=(attempt == 2))
+        try:
+            return await tg_call(lambda: bot.send_audio(CHAT_ID, audio, message_thread_id=topic_id, **kw))
+        except TelegramBadRequest as e:
+            if attempt == 1 and "thread" in str(e).lower():
+                log.error("topic %s was deleted, creating a new one", key)
+                continue
+            raise
+
+
+# ------------------------------------------------------------------- auth
+ANON_ADMIN_ID = 1087968824  # Telegram's "GroupAnonymousBot" (admin posting anonymously)
+
+
+async def _status(bot: Bot, uid: int) -> str:
+    try:
+        return (await bot.get_chat_member(CHAT_ID, uid)).status
+    except Exception:
+        return "left"
+
+
+async def is_admin(bot: Bot, uid: int) -> bool:
+    return uid == ANON_ADMIN_ID or await _status(bot, uid) in ("creator", "administrator")
+
+
+async def can_use(bot: Bot, chat, uid: int) -> bool:
+    """Inside the music group: anyone there. In a private chat: only group members."""
+    if chat.id == CHAT_ID:
+        return True
+    return await _status(bot, uid) in ("creator", "administrator", "member", "restricted")
+
+
+ALLOWED_MSG = (F.chat.id == CHAT_ID) | (F.chat.type == "private")
+ALLOWED_CB = (F.message.chat.id == CHAT_ID) | (F.message.chat.type == "private")
 
 
 async def fetch_image(session: aiohttp.ClientSession, url: str, max_bytes: int = 10_000_000) -> bytes | None:

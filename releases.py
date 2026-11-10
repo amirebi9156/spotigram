@@ -9,6 +9,7 @@ Artists live in artists.txt, one per line (managed from the menu: `spotigram art
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import shutil
 import tempfile
@@ -28,8 +29,8 @@ from aiogram.types import BufferedInputFile, FSInputFile
 from core import (
     ARTISTS_FILE, AUDIO_FMT_SC, AUDIO_FMT_YT, CHAT_ID, HEADERS, RELEASE_INTERVAL,
     RELEASE_MAX_AGE_HOURS, RELEASE_MAX_ATTEMPTS, RELEASE_MAX_SECONDS, RELEASE_MIN_SECONDS,
-    RELEASES_TOPIC_NAME, db, dl_lock, download_url, fetch_image, log, lyrics_kb, tg_call,
-    ytdlp_opts,
+    RELEASES_TOPIC_NAME, db, dl_lock, download_url, fetch_image, log, lyrics_kb, send_audio_topic,
+    topic_id_for, ytdlp_opts,
 )
 
 YT_FEED = "https://www.youtube.com/feeds/videos.xml?channel_id={}"
@@ -224,17 +225,7 @@ def bump_attempts(iid: str) -> int:
 
 
 async def ensure_releases_topic(bot: Bot, force_new: bool = False) -> int:
-    row = db.execute("SELECT value FROM meta WHERE key='releases_topic'").fetchone()
-    if row and not force_new:
-        return int(row[0])
-    topic = await tg_call(
-        lambda: bot.create_forum_topic(CHAT_ID, RELEASES_TOPIC_NAME[:128], icon_color=0xFB6F5F)
-    )
-    db.execute(
-        "INSERT OR REPLACE INTO meta VALUES ('releases_topic', ?)", (str(topic.message_thread_id),)
-    )
-    db.commit()
-    return topic.message_thread_id
+    return await topic_id_for(bot, "releases_topic", RELEASES_TOPIC_NAME, 0xFB6F5F, force_new)
 
 
 def _thumb_url(item: dict, info: dict) -> str | None:
@@ -258,23 +249,11 @@ async def send_release(
         duration = int(dinfo.get("duration") or info.get("duration") or 0) or None
         caption = f"🆕 {artist.name} — {title}\n{PLATFORM_NAME[item['platform']]} · {item['url']}"
 
-        msg = None
-        for attempt in (1, 2):
-            topic_id = await ensure_releases_topic(bot, force_new=(attempt == 2))
-            try:
-                msg = await tg_call(
-                    lambda: bot.send_audio(
-                        CHAT_ID, FSInputFile(path), message_thread_id=topic_id, title=title,
-                        performer=artist.name, duration=duration, thumbnail=thumb,
-                        caption=caption, reply_markup=lyrics_kb(),
-                    )
-                )
-                break
-            except TelegramBadRequest as e:
-                if attempt == 1 and "thread" in str(e).lower():
-                    log.error("releases topic was deleted, creating a new one")
-                    continue
-                raise
+        await send_audio_topic(
+            bot, "releases_topic", RELEASES_TOPIC_NAME, 0xFB6F5F, FSInputFile(path), title=title,
+            performer=artist.name, duration=duration, thumbnail=thumb, caption=caption,
+            reply_markup=lyrics_kb(),
+        )
         db.execute(
             "INSERT OR REPLACE INTO releases (key, artist, title, platform, url) VALUES (?,?,?,?,?)",
             (release_key(artist.name, title), artist.name, title, item["platform"], item["url"]),
@@ -487,6 +466,40 @@ def artists_cli() -> None:
         print()
 
 
+def add_artist(artists: list[Artist], name: str, picks: list[tuple[str, str, str]], save: bool = True) -> Artist:
+    """Merge (platform, id, label) picks into the artist (created if new) and save the file."""
+    art = next((a for a in artists if _norm(a.name) == _norm(name)), None)
+    if art is None:
+        art = Artist(name)
+        artists.append(art)
+    notes = [art.note] if art.note else []
+    for p, i, label in picks:
+        lst = art.yt if p == "yt" else art.sc
+        if i not in lst:
+            lst.append(i)
+            notes.append(label[:40])
+    art.note = ", ".join(dict.fromkeys(n for n in notes if n))
+    if save:
+        write_artists(artists)
+    return art
+
+
+def artist_hash(name: str) -> str:
+    return hashlib.md5(_norm(name).encode()).hexdigest()[:8]
+
+
+def follow_candidates(name: str) -> list[dict]:
+    """Blocking (run in a thread): YouTube/SoundCloud sources for an artist, best ones preselected."""
+    yt, sc = search_youtube_channels(name), search_soundcloud_profiles(name)
+    out: list[dict] = []
+    for c in yt[:4]:
+        topic = c["label"].lower().endswith("- topic")
+        out.append({"platform": "yt", "id": c["id"], "label": c["label"], "on": topic or c is yt[0]})
+    for c in sc[:2]:
+        out.append({"platform": "sc", "id": c["id"], "label": c["label"], "on": c["score"] >= 6})
+    return out
+
+
 def _add_artist_flow(artists: list[Artist]) -> None:
     name = input("Artist name: ").strip()
     if not name:
@@ -505,16 +518,5 @@ def _add_artist_flow(artists: list[Artist]) -> None:
         print(f"   {PLATFORM_NAME[p]}: {label}")
     if input("Save? [Y/n] ").strip().lower().startswith("n"):
         return
-    art = next((a for a in artists if _norm(a.name) == _norm(name)), None)
-    if art is None:
-        art = Artist(name)
-        artists.append(art)
-    notes = [art.note] if art.note else []
-    for p, i, label in picks:
-        lst = art.yt if p == "yt" else art.sc
-        if i not in lst:
-            lst.append(i)
-            notes.append(label[:40])
-    art.note = ", ".join(dict.fromkeys(n for n in notes if n))
-    write_artists(artists)
+    add_artist(artists, name, picks, save=True)
     print("Saved. The bot starts watching within a few minutes (current uploads are ignored, only new ones are sent).")

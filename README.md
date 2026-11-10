@@ -6,7 +6,23 @@ Your music, in Telegram. One private supergroup with Topics, and a light bot (si
 2. **New releases**: watches the artists you choose on **YouTube** and **SoundCloud** and posts each new song to one topic (`🆕 New Releases`) as soon as *any* platform shows it first. The copy that appears later on another platform is skipped.
 3. **Lyrics**: tap **📝 Lyrics** under any song, or reply to a song with `/lyrics` (or the word `lyrics` / `متن` / `تکست`), or send `/lyrics Artist - Title`. Lyrics come from [LRCLIB](https://lrclib.net).
 
+4. **Control from Telegram**: everything above can be managed from the group or from a private chat with the bot (see below).
+
 No Spotify login, developer app or Premium is needed. Playlists are read from Spotify's public embed page, so each playlist just has to be **Public**.
+
+## Using it from Telegram
+
+Works in the group and in a private chat with the bot (DM only for members of the group). Send `/menu` for buttons.
+
+| Command | What it does |
+| --- | --- |
+| `/menu` | Main menu |
+| `/search name` | Search a song or artist (DM: just type the name) |
+| `/playlists`, `/addplaylist link` | List / add playlists (DM: paste a Spotify link). Admins only for add/remove |
+| `/artists` | Artists you follow for new releases |
+| `/lyrics` | Lyrics of the song you reply to |
+
+Search shows matching artists and songs (metadata from Deezer's public API). Tap a song to add it to the `🎧 Picks` topic, or open an artist to see top songs and albums (add one song, a page, or a whole album), or tap **Follow** to pick their YouTube / SoundCloud sources; new songs then go to `🆕 New Releases` automatically. Adding playlists in bulk, following and removing are admin-only.
 
 ## One-line install
 
@@ -46,6 +62,7 @@ Afterwards open the management menu any time with `sudo spotigram`. It covers in
 | `SYNC_INTERVAL` | Seconds between playlist checks (default 600) |
 | `RELEASE_INTERVAL` | Seconds between new-release checks (default 180) |
 | `RELEASES_TOPIC_NAME` | Name of the new-releases topic |
+| `PICKS_TOPIC_NAME` | Name of the topic for songs added from search |
 | `RELEASE_MAX_AGE_HOURS`, `RELEASE_MIN_SECONDS`, `RELEASE_MAX_SECONDS` | Release filters |
 | `YTDLP_COOKIES` | Optional cookies.txt path if YouTube blocks the server |
 

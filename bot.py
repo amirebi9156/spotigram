@@ -14,12 +14,15 @@ import sys
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BotCommand, BotCommandScopeAllGroupChats, CallbackQuery, Message
+from aiogram.types import (
+    BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats, CallbackQuery, Message,
+)
 
 import lyrics
 import playlists
 import releases
-from core import BOT_TOKEN, CHAT_ID, log
+import ui
+from core import ALLOWED_CB, ALLOWED_MSG, BOT_TOKEN, CHAT_ID, can_use, log
 
 router = Router()
 
@@ -35,23 +38,28 @@ TRIGGERS = {"lyrics", "lyric", "text", "متن", "تکست", "متنش", "متن
 async def lyrics_for_audio(bot: Bot, msg: Message) -> None:
     a = msg.audio
     if not a or not (a.title or a.performer):
-        await bot.send_message(CHAT_ID, "That song has no title/artist tags. Use /lyrics Artist - Title",
+        await bot.send_message(msg.chat.id, "That song has no title/artist tags. Use /lyrics Artist - Title",
                                message_thread_id=msg.message_thread_id if msg.is_topic_message else None)
         return
     await lyrics.deliver(bot, msg, a.performer or "", a.title or "", a.duration or 0)
 
 
-@router.callback_query(F.data == "lyr", F.message.chat.id == CHAT_ID)
+@router.callback_query(F.data == "lyr", ALLOWED_CB)
 async def on_lyrics_button(cb: CallbackQuery, bot: Bot) -> None:
     if not cb.message or not getattr(cb.message, "audio", None):
         await cb.answer("No song here")
+        return
+    if not await can_use(bot, cb.message.chat, cb.from_user.id):
+        await cb.answer("Join the music group first.", show_alert=True)
         return
     await cb.answer("🔎 Searching lyrics...")
     await lyrics_for_audio(bot, cb.message)
 
 
-@router.message(Command("lyrics", "l", "text", "matn"), F.chat.id == CHAT_ID)
+@router.message(Command("lyrics", "l", "text", "matn"), ALLOWED_MSG)
 async def on_lyrics_command(message: Message, command: CommandObject, bot: Bot) -> None:
+    if not await can_use(bot, message.chat, message.from_user.id):
+        return
     target = message.reply_to_message
     if target and target.audio:
         await lyrics_for_audio(bot, target)
@@ -63,9 +71,9 @@ async def on_lyrics_command(message: Message, command: CommandObject, bot: Bot) 
         await message.reply(HELP)
 
 
-@router.message(F.chat.id == CHAT_ID, F.reply_to_message.audio, F.text)
+@router.message(ALLOWED_MSG, F.reply_to_message.audio, F.text.func(lambda t: t.strip().lower() in TRIGGERS))
 async def on_reply_word(message: Message, bot: Bot) -> None:
-    if message.text.strip().lower() in TRIGGERS:
+    if await can_use(bot, message.chat, message.from_user.id):
         await lyrics_for_audio(bot, message.reply_to_message)
 
 
@@ -74,12 +82,19 @@ async def main() -> None:
         sys.exit("BOT_TOKEN and CHAT_ID must be set in .env")
     bot = Bot(BOT_TOKEN)
     dp = Dispatcher()
-    dp.include_router(router)
+    dp.include_router(router)  # lyrics first, then the menu
+    dp.include_router(ui.router)
     try:
-        await bot.set_my_commands(
-            [BotCommand(command="lyrics", description="Lyrics of the song you reply to")],
-            scope=BotCommandScopeAllGroupChats(),
-        )
+        cmds = [
+            BotCommand(command="menu", description="Open the menu"),
+            BotCommand(command="search", description="Search a song or artist"),
+            BotCommand(command="playlists", description="Show / add playlists"),
+            BotCommand(command="addplaylist", description="Add a Spotify playlist"),
+            BotCommand(command="artists", description="Artists I follow"),
+            BotCommand(command="lyrics", description="Lyrics of the song you reply to"),
+        ]
+        await bot.set_my_commands(cmds, scope=BotCommandScopeAllGroupChats())
+        await bot.set_my_commands(cmds, scope=BotCommandScopeAllPrivateChats())
     except Exception as e:
         log.warning("could not set bot commands: %s", e)
     try:
