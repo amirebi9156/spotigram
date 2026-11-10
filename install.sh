@@ -96,9 +96,10 @@ configure() {
     [ -n "$val" ] && set_env "$key" "$val"
   done
 
-  if yes_no "Edit advanced settings (sync interval, yt-dlp cookies)?" n; then
+  if yes_no "Edit advanced settings (check intervals, yt-dlp cookies)?" n; then
     local adv=(
-      "SYNC_INTERVAL|Sync interval in seconds"
+      "SYNC_INTERVAL|Playlist check interval in seconds"
+      "RELEASE_INTERVAL|New-release check interval in seconds (default 180)"
       "YTDLP_COOKIES|Path to cookies.txt for yt-dlp (empty = none)"
     )
     for p in "${adv[@]}"; do
@@ -185,6 +186,13 @@ manage_playlists() {
       b|"") return 0;;
     esac
   done
+}
+
+# ----------------------------------------------------------------- artists
+manage_artists() {
+  is_installed || { err "Install first"; return 1; }
+  touch "$APP_DIR/artists.txt"
+  (cd "$APP_DIR" && "$VENV/bin/python" bot.py artists < /dev/tty)
 }
 
 # ------------------------------------------------------------ install parts
@@ -298,6 +306,7 @@ do_install() {
   echo
   info "Add your Spotify playlist links (Share -> Copy link). Each playlist must be Public."
   while add_playlist; do :; done
+  if yes_no "Watch artists for new releases on YouTube/SoundCloud now?" n; then manage_artists; fi
   systemctl enable --now "$SERVICE" >/dev/null 2>&1
   sleep 2
   health_check
@@ -341,6 +350,7 @@ q = lambda s: db.execute(s).fetchall()
 print(f"Playlists (topics created) : {q('SELECT COUNT(*) FROM playlists WHERE topic_id IS NOT NULL')[0][0]}")
 print(f"Tracks sent                : {q('SELECT COUNT(*) FROM tracks')[0][0]}")
 print(f"Unique files cached        : {q('SELECT COUNT(*) FROM files')[0][0]}")
+print(f"New releases sent          : {q('SELECT COUNT(*) FROM releases')[0][0]}")
 print(f"Failed, will retry         : {q('SELECT COUNT(*) FROM failed WHERE attempts < 3')[0][0]}")
 print(f"Failed, gave up            : {q('SELECT COUNT(*) FROM failed WHERE attempts >= 3')[0][0]}")
 print()
@@ -393,7 +403,7 @@ health_check() {
   if systemctl is-enabled --quiet "$SERVICE" 2>/dev/null; then ok "Autostart on boot: enabled"; else warn "Autostart on boot: disabled"; fi
 
   local u code
-  for u in "https://api.telegram.org" "https://open.spotify.com" "https://www.youtube.com"; do
+  for u in "https://api.telegram.org" "https://open.spotify.com" "https://www.youtube.com" "https://soundcloud.com" "https://lrclib.net"; do
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$u")"
     if [ "$code" != "000" ]; then ok "Reachable: $u (HTTP $code)"; else err "Unreachable: $u"; fi
   done
@@ -415,6 +425,10 @@ health_check() {
     err "No playlists added (menu: Manage playlists)"
   fi
 
+  local na
+  na="$(grep -cvE '^[[:space:]]*(#|$)' "$APP_DIR/artists.txt" 2>/dev/null)"
+  if [ "${na:-0}" -gt 0 ]; then ok "Artists watched for new releases: $na"; else warn "No artists added (menu: Manage artists)"; fi
+
   ok "Disk: $(df -h "$APP_DIR" | awk 'NR==2 {print $4 " free of " $2}')"
 
   local issues
@@ -433,7 +447,7 @@ do_uninstall() {
   rm -f "$UNIT" "$CLI"
   systemctl daemon-reload
   ok "Service removed"
-  if yes_no "Also delete $APP_DIR (settings, playlist list and database)?" n; then
+  if yes_no "Also delete $APP_DIR (settings, playlist/artist lists and database)?" n; then
     rm -rf "$APP_DIR"
     ok "Files deleted"
   else
@@ -463,15 +477,16 @@ menu_loop() {
     echo " 2) Update from GitHub"
     echo " 3) Edit settings"
     echo " 4) Manage playlists"
-    echo " 5) Start"
-    echo " 6) Stop"
-    echo " 7) Restart"
-    echo " 8) Health check"
-    echo " 9) Live logs"
-    echo "10) Statistics"
-    echo "11) Retry failed tracks"
-    echo "12) Update yt-dlp"
-    echo "13) Uninstall"
+    echo " 5) Manage artists (new releases)"
+    echo " 6) Start"
+    echo " 7) Stop"
+    echo " 8) Restart"
+    echo " 9) Health check"
+    echo "10) Live logs"
+    echo "11) Statistics"
+    echo "12) Retry failed tracks"
+    echo "13) Update yt-dlp"
+    echo "14) Uninstall"
     echo " 0) Exit"
     echo
     read -r -p "Choose: " c < /dev/tty
@@ -481,15 +496,16 @@ menu_loop() {
       2)  do_update; pause;;
       3)  is_installed && configure || err "Install first"; pause;;
       4)  manage_playlists;;
-      5)  svc start; pause;;
-      6)  svc stop; pause;;
-      7)  svc restart; pause;;
-      8)  health_check; pause;;
-      9)  follow_logs;;
-      10) show_stats; pause;;
-      11) retry_failed; pause;;
-      12) update_ytdlp; pause;;
-      13) do_uninstall; pause;;
+      5)  manage_artists;;
+      6)  svc start; pause;;
+      7)  svc stop; pause;;
+      8)  svc restart; pause;;
+      9)  health_check; pause;;
+      10) follow_logs;;
+      11) show_stats; pause;;
+      12) retry_failed; pause;;
+      13) update_ytdlp; pause;;
+      14) do_uninstall; pause;;
       0|q) exit 0;;
       *)  warn "Invalid choice"; sleep 1;;
     esac
@@ -506,6 +522,7 @@ main() {
     stats)    show_stats;;
     start|stop|restart) svc "$1";;
     playlists) manage_playlists;;
+    artists)  manage_artists;;
     uninstall) do_uninstall;;
     menu|*)   menu_loop;;
   esac

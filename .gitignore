@@ -1,6 +1,7 @@
 .env
 state.db
 playlists.txt
+artists.txt
 venv/
 __pycache__/
 *.pyc

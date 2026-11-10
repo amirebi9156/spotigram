@@ -1,8 +1,12 @@
 # Spotigram
 
-Mirror your Spotify playlists into a Telegram group: one topic per playlist, every track uploaded as audio, new tracks picked up automatically. Built to be light enough for a small VPS (single process, no ffmpeg, SQLite state).
+Your music, in Telegram. One private supergroup with Topics, and a light bot (single process, no ffmpeg, SQLite state) that does three things:
 
-**No Spotify account login, developer app or Premium is needed.** Playlists are read from Spotify's public embed page, so each playlist just has to be **Public**.
+1. **Playlists**: every Spotify playlist becomes a topic; its tracks are uploaded as audio and new tracks are picked up automatically. The playlist cover is posted (and pinned) at the top of its topic.
+2. **New releases**: watches the artists you choose on **YouTube** and **SoundCloud** and posts each new song to one topic (`🆕 New Releases`) as soon as *any* platform shows it first. The copy that appears later on another platform is skipped.
+3. **Lyrics**: tap **📝 Lyrics** under any song, or reply to a song with `/lyrics` (or the word `lyrics` / `متن` / `تکست`), or send `/lyrics Artist - Title`. Lyrics come from [LRCLIB](https://lrclib.net).
+
+No Spotify login, developer app or Premium is needed. Playlists are read from Spotify's public embed page, so each playlist just has to be **Public**.
 
 ## One-line install
 
@@ -10,32 +14,28 @@ Mirror your Spotify playlists into a Telegram group: one topic per playlist, eve
 curl -fsSL -o /tmp/spotigram-install.sh https://raw.githubusercontent.com/amirebi9156/spotigram/main/install.sh && sudo bash /tmp/spotigram-install.sh
 ```
 
-After installing, open the management menu any time with:
-
-```bash
-sudo spotigram
-```
-
-The menu covers install, update, settings, playlist management, start/stop/restart, health check, live logs, statistics, retrying failed tracks, yt-dlp update and uninstall. Most actions also work as a command: `spotigram status`, `spotigram logs`, `spotigram playlists`, `spotigram update`, ...
+Afterwards open the management menu any time with `sudo spotigram`. It covers install, update, settings, playlists, artists, start/stop/restart, health check, live logs, statistics, retrying failed tracks, yt-dlp update and uninstall. Most actions also work as commands: `spotigram status`, `spotigram logs`, `spotigram playlists`, `spotigram artists`, `spotigram update`, ...
 
 ## Before you install
 
-1. **Telegram**: create a bot with @BotFather. Create a supergroup, turn **Topics** on, add the bot as admin with **Manage Topics**. You need the group id (starts with `-100`).
-2. **Spotify**: in the Spotify app make the playlists you want **Public** (playlist menu -> *Add to profile* / *Make public*), then copy each playlist link (Share -> Copy link). You add the links during install or later from the menu.
-3. Run the server **outside Iran** (Spotify, YouTube and Telegram must be reachable).
+1. **Telegram**: create a bot with @BotFather. Create a **private** supergroup, turn **Topics** on, add the bot as admin with **Manage Topics** (and **Pin Messages** for pinned covers). You need the group id (starts with `-100`).
+2. **Playlists**: make the playlists you want **Public** in the Spotify app, then copy each link (Share -> Copy link). Add them during install or later from the menu.
+3. **Artists** (optional): in the menu choose *Manage artists*, type an artist name, and pick the YouTube channels and SoundCloud profile the bot found (or paste links). An `Artist - Topic` YouTube channel is the auto-generated audio channel and is usually the fastest source.
+4. Run the server **outside Iran**.
 
 ## How it works
 
-- Every sync cycle the bot downloads each playlist's embed page (`open.spotify.com/embed/playlist/<id>`) and reads the track list from the JSON inside it. New tracks are detected by comparing against the database.
-- Each track is matched on YouTube by name and duration, downloaded as m4a with `yt-dlp`, and sent with `sendAudio` into the playlist's topic.
-- SQLite keeps `playlist -> topic`, `track -> message` and Telegram `file_id`s, so nothing is sent twice and shared tracks upload only once.
-- Playlist links live in `/opt/spotigram/playlists.txt` and are re-read every cycle, so adding one needs no restart.
+- **Playlists**: every cycle the bot reads each playlist's embed page and compares it with the database. New tracks are matched on YouTube by name and duration, downloaded as m4a with `yt-dlp` and sent into the playlist's topic. Telegram `file_id`s are reused when a track is in several playlists.
+- **New releases**: YouTube channel RSS feeds and SoundCloud profiles are checked every 3 minutes. The first time an artist is added, existing uploads are only recorded, so nothing old is sent. A new upload is ignored if it looks like a teaser/snippet/live/interview, is shorter than 1 or longer than 12 minutes, or is older than 72 hours. Songs are identified by a normalized "artist + title", so `Artist - Song (Official Video)` and `Song` are the same release.
+- **Lyrics**: the bot reads replies and button taps in your group only. Long lyrics are sent as a `.txt` file.
+- Everything is stored in `/opt/spotigram` (`.env`, `playlists.txt`, `artists.txt`, `state.db`). The two lists are re-read every cycle, so edits need no restart.
 
 ## Limits
 
-- Only **Public** playlists work.
-- Spotify's embed page exposes about 100 tracks per playlist; longer playlists may be incomplete.
-- This relies on an unofficial page format, so Spotify can change it. If playlists stop loading, run `spotigram update`.
+- Only **Public** playlists work, and Spotify's embed page exposes the **first 100 tracks** of a playlist. For longer ones, move already-delivered tracks to another playlist (the bot never deletes anything from Telegram) or split the playlist.
+- This relies on unofficial page formats, so Spotify, YouTube or SoundCloud changes can break it. `spotigram update` and *Update yt-dlp* fix most cases.
+- Release detection is as fast as the platforms' feeds (YouTube RSS can lag a few minutes). Spotify is not monitored.
+- Lyrics coverage depends on the community database; some songs (especially non-English) may not be found.
 
 ## Config (`/opt/spotigram/.env`)
 
@@ -43,9 +43,12 @@ The menu covers install, update, settings, playlist management, start/stop/resta
 | --- | --- |
 | `BOT_TOKEN` | Telegram bot token |
 | `CHAT_ID` | Supergroup id |
-| `SYNC_INTERVAL` | Seconds between sync cycles (default 600) |
+| `SYNC_INTERVAL` | Seconds between playlist checks (default 600) |
+| `RELEASE_INTERVAL` | Seconds between new-release checks (default 180) |
+| `RELEASES_TOPIC_NAME` | Name of the new-releases topic |
+| `RELEASE_MAX_AGE_HOURS`, `RELEASE_MIN_SECONDS`, `RELEASE_MAX_SECONDS` | Release filters |
 | `YTDLP_COOKIES` | Optional cookies.txt path if YouTube blocks the server |
 
 ## Notes
 
-For personal use only. Respect the terms of the services you connect and copyright law in your country.
+For personal use only. Keep the group private, and respect the terms of the services you connect and copyright law in your country.
