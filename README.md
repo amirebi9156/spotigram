@@ -4,7 +4,7 @@ Your music, in Telegram. One private supergroup with Topics, and a light bot (si
 
 1. **Playlists**: every Spotify playlist becomes a topic; its tracks are uploaded as audio and new tracks are picked up automatically. The playlist cover is posted (and pinned) at the top of its topic.
 2. **New releases**: watches the artists you choose on **YouTube** and **SoundCloud** and posts each new song to one topic (`🆕 New Releases`) as soon as *any* platform shows it first. The copy that appears later on another platform is skipped.
-3. **Lyrics**: tap **📝 Lyrics** under any song, or reply to a song with `/lyrics` (or the word `lyrics` / `متن` / `تکست`), or send `/lyrics Artist - Title`. Lyrics come from [LRCLIB](https://lrclib.net).
+3. **Lyrics**: no button under songs (keeps the group clean). Open the bot in private and send a song name or the music file, or reply to a song in the group with `/lyrics` (or the word `lyrics` / `متن` / `تکست`). Lyrics always arrive in your private chat with the bot (press Start there once). Source: [LRCLIB](https://lrclib.net).
 
 4. **Control from Telegram**: everything above can be managed from the group or from a private chat with the bot (see below).
 
@@ -21,7 +21,7 @@ Works in the group and in a private chat with the bot (DM only for members of th
 | `/playlists`, `/addplaylist link` | List / add playlists (DM: paste a Spotify link). Admins only for add/remove |
 | `/artists` | Artists you follow for new releases |
 | `/status` | Health, failed songs, connection check, **Retry failed** (admins) |
-| `/lyrics` | Lyrics of the song you reply to |
+| `/lyrics` | Lyrics (sent to you privately): reply to a song, or `/lyrics Artist - Title`, or in private just send the name / music file |
 
 Search shows matching artists and songs (metadata from Deezer's public API). Tap a song to add it to the `🎧 Picks` topic, or open an artist to see top songs and albums (add one song, a page, or a whole album), or tap **Follow** to pick their YouTube / SoundCloud sources; new songs then go to `🆕 New Releases` automatically. Adding playlists in bulk, following and removing are admin-only.
 
@@ -48,7 +48,7 @@ Afterwards open the management menu any time with `sudo spotigram`. It covers in
 
 - **Playlists**: every cycle the bot reads each playlist's embed page and compares it with the database. New tracks are matched on YouTube by name and duration, downloaded as m4a with `yt-dlp` and sent into the playlist's topic. Telegram `file_id`s are reused when a track is in several playlists.
 - **New releases**: YouTube channel RSS feeds and SoundCloud profiles are checked every 3 minutes. The first time an artist is added, existing uploads are only recorded, so nothing old is sent. A new upload is ignored if it looks like a teaser/snippet/live/interview, is shorter than 1 or longer than 12 minutes, or is older than 72 hours. Songs are identified by a normalized "artist + title", so `Artist - Song (Official Video)` and `Song` are the same release.
-- **Lyrics**: the bot reads replies and button taps in your group only. Long lyrics are sent as a `.txt` file.
+- **Lyrics**: long lyrics are sent as a `.txt` file.
 - Everything is stored in `/opt/spotigram` (`.env`, `playlists.txt`, `artists.txt`, `state.db`). The two lists are re-read every cycle, so edits need no restart.
 
 ## Limits

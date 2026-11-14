@@ -99,15 +99,39 @@ def chunk(text: str, limit: int = MSG_LIMIT) -> list[str]:
     return out
 
 
-async def deliver(bot: Bot, anchor: Message, artist: str, title: str, duration: int = 0) -> None:
-    """Find lyrics and post them as a reply to `anchor`, inside the same topic."""
-    thread = anchor.message_thread_id if anchor.is_topic_message else None
-    reply = ReplyParameters(message_id=anchor.message_id, allow_sending_without_reply=True)
+async def search_candidates(query: str, limit: int = 6) -> list[dict]:
+    """Songs on LRCLIB matching free text (for the 'search lyrics' menu)."""
+    async with aiohttp.ClientSession() as session:
+        res = await _get(session, "search", {"q": query})
+    out, seen = [], set()
+    for x in res if isinstance(res, list) else []:
+        if not _usable(x):
+            continue
+        k = (_norm(x.get("artistName")), _norm(x.get("trackName")))
+        if k in seen or not x.get("trackName"):
+            continue
+        seen.add(k)
+        out.append({"artist": x.get("artistName") or "", "title": x["trackName"], "duration": int(x.get("duration") or 0)})
+        if len(out) >= limit:
+            break
+    return out
+
+
+async def deliver(bot: Bot, anchor: Message | None, artist: str, title: str, duration: int = 0,
+                  dest: int | None = None) -> None:
+    """Find lyrics and send them. With `dest` (a user id) they go to that private chat and the group
+    stays clean; otherwise they are posted as a reply to `anchor` in its topic."""
+    if dest is not None or anchor is None:
+        chat_id, thread, reply = dest, None, None
+    else:
+        chat_id = anchor.chat.id
+        thread = anchor.message_thread_id if anchor.is_topic_message else None
+        reply = ReplyParameters(message_id=anchor.message_id, allow_sending_without_reply=True)
 
     async def say(text: str, as_reply: bool = True) -> None:
         await tg_call(
             lambda: bot.send_message(
-                anchor.chat.id, text, message_thread_id=thread, reply_parameters=reply if as_reply else None
+                chat_id, text, message_thread_id=thread, reply_parameters=reply if as_reply else None
             )
         )
 
@@ -135,7 +159,7 @@ async def deliver(bot: Bot, anchor: Message, artist: str, title: str, duration: 
         doc = BufferedInputFile(f"{head}\n\n{text}".encode("utf-8"), f"{shown_artist} - {shown_title}.txt")
         await tg_call(
             lambda: bot.send_document(
-                anchor.chat.id, doc, message_thread_id=thread, reply_parameters=reply, caption=head
+                chat_id, doc, message_thread_id=thread, reply_parameters=reply, caption=head
             )
         )
         return

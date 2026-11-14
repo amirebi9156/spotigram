@@ -29,7 +29,7 @@ import playlists
 import releases
 from core import (
     ALLOWED_CB, ALLOWED_MSG, CHAT_ID, PICKS_TOPIC_NAME, db, dl_lock, fetch_image, is_admin,
-    can_use, log, lyrics_kb, send_audio_topic, tg_call,
+    can_use, log, send_audio_topic, tg_call,
 )
 
 router = Router()
@@ -38,7 +38,9 @@ PER_PAGE = 8
 MAX_ADD_ALL = 30
 PROMPT_PLAYLIST = "➕ Send a public Spotify playlist link (reply to this message)"
 PROMPT_SEARCH = "🔎 Send a song or artist name (reply to this message)"
-PROMPTS = {PROMPT_PLAYLIST, PROMPT_SEARCH}
+PROMPT_LYRICS = "📝 Send a song name, like: Artist - Title (reply to this message). You can also just send me the music file."
+PROMPTS = {PROMPT_PLAYLIST, PROMPT_SEARCH, PROMPT_LYRICS}
+LYR: dict[str, list[dict]] = {}  # token -> lyrics candidates
 
 BG: set[asyncio.Task] = set()  # keeps background tasks alive until they finish
 _adding: set[str] = set()  # song keys currently being added (avoid double sends)
@@ -211,11 +213,36 @@ def status_screen(admin: bool) -> tuple[str, InlineKeyboardMarkup]:
 
 def help_text() -> str:
     return (
-        "📝 <b>Lyrics</b>: tap 📝 under a song, reply to it with /lyrics (or the word متن / lyrics), "
-        "or /lyrics Artist - Title\n\n"
-        "<b>Commands</b>\n/menu · /search name · /playlists · /addplaylist link · /artists · /status\n"
-        "In a private chat with me you can just send an artist or song name, or a Spotify playlist link."
+        "📝 <b>Lyrics</b>\n<blockquote>Lyrics are sent to you in private, so the group stays clean.</blockquote>\n"
+        "• Open me in private and send a song name or the music file\n"
+        "• Or reply to a song in the group with /lyrics (or the word متن)\n\n"
+        "<b>Commands</b>\n/menu · /search name · /playlists · /addplaylist link · /artists · /status · /lyrics\n"
+        "In private you can also just type an artist or song name, or paste a Spotify playlist link."
     )
+
+
+async def ask_lyrics(bot: Bot, m: Message) -> None:
+    await tg_call(lambda: bot.send_message(m.chat.id, PROMPT_LYRICS, reply_markup=ForceReply()))
+
+
+async def do_lyrics_search(bot: Bot, m: Message, query: str) -> None:
+    import lyrics
+    parts = re.split(r"\s+[-–—]\s+", query.strip(), maxsplit=1)
+    if len(parts) == 2:  # "Artist - Title": go straight to the lyrics
+        await lyrics.deliver(bot, None, parts[0], parts[1], dest=m.chat.id)
+        return
+    found = await lyrics.search_candidates(query.strip())
+    if not found:
+        await say(bot, m, f"No lyrics found for <b>{esc(query)}</b>.\nTry <code>Artist - Title</code>.",
+                  KB([[B("‹ Menu", "m:main")]]))
+        return
+    token = secrets.token_hex(3)
+    if len(LYR) > 100:
+        LYR.clear()
+    LYR[token] = found
+    rows = [[B(f"📝  {cut(c['artist'] + ' — ' + c['title'], 44)}", f"lg:{token}:{i}")] for i, c in enumerate(found)]
+    rows.append([B("‹ Menu", "m:main")])
+    await say(bot, m, f"📝 <b>{esc(query)}</b>\n<blockquote>Pick the song to get its lyrics.</blockquote>", KB(rows))
 
 
 async def check_connections() -> list[str]:
@@ -342,8 +369,7 @@ async def add_song(bot: Bot, tr: dict) -> tuple[str, str]:
     try:
         cached = db.execute("SELECT file_id FROM files WHERE track_id=?", (fkey,)).fetchone()
         if cached:
-            msg = await send_audio_topic(bot, "picks_topic", PICKS_TOPIC_NAME, 0xFFD67E, cached[0],
-                                         reply_markup=lyrics_kb())
+            msg = await send_audio_topic(bot, "picks_topic", PICKS_TOPIC_NAME, 0xFFD67E, cached[0])
         else:
             tmp = tempfile.mkdtemp(prefix="spotigram_pick_")
             try:
@@ -360,8 +386,7 @@ async def add_song(bot: Bot, tr: dict) -> tuple[str, str]:
                 msg = await send_audio_topic(
                     bot, "picks_topic", PICKS_TOPIC_NAME, 0xFFD67E, FSInputFile(path),
                     title=tr["title"], performer=tr["artist"], duration=tr["duration"] or None,
-                    thumbnail=BufferedInputFile(img, "cover.jpg") if img else None,
-                    reply_markup=lyrics_kb(),
+                    thumbnail=BufferedInputFile(img, "cover.jpg") if img else None
                 )
                 db.execute("INSERT OR REPLACE INTO files VALUES (?, ?)", (fkey, msg.audio.file_id))
             finally:
@@ -444,9 +469,11 @@ async def need_admin(bot: Bot, uid: int) -> bool:
 
 
 @router.message(ALLOWED_MSG, Command("menu", "start", "help"))
-async def cmd_menu(m: Message, bot: Bot) -> None:
+async def cmd_menu(m: Message, command: CommandObject, bot: Bot) -> None:
     if not await can_use(bot, m.chat, m.from_user.id):
         return await deny(m, bot)
+    if m.chat.type == "private" and (command.args or "").strip() == "lyrics":
+        return await ask_lyrics(bot, m)
     text, kb = main_menu()
     await say(bot, m, text + "\n\n" + help_text(), kb)
 
@@ -509,6 +536,8 @@ async def is_prompt_reply(m: Message, bot: Bot) -> bool:
 async def on_prompt_reply(m: Message, bot: Bot) -> None:
     if not await can_use(bot, m.chat, m.from_user.id):
         return await deny(m, bot)
+    if m.reply_to_message.text == PROMPT_LYRICS:
+        return await do_lyrics_search(bot, m, m.text)
     if m.reply_to_message.text == PROMPT_PLAYLIST:
         if not await need_admin(bot, m.from_user.id):
             return await say(bot, m, "Only group admins can add playlists.")
@@ -530,7 +559,7 @@ async def on_private_text(m: Message, bot: Bot) -> None:
         await do_search(bot, m, m.text.strip())
 
 
-CB_PATTERN = r"^(m|pl|ar|a|at|ab|al|ap|t|w|f|fq|fs|fo|fc|st|noop)(:|$)"
+CB_PATTERN = r"^(m|pl|ar|a|at|ab|al|ap|t|w|lg|f|fq|fs|fo|fc|st|noop)(:|$)"
 
 
 @router.callback_query(ALLOWED_CB, F.data.regexp(CB_PATTERN))
@@ -562,13 +591,29 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
             text, kb = artists_screen(await need_admin(bot, uid))
             return await edit(cb, text, kb)
         if what == "ly":
-            return await edit(cb, help_text(), KB([[B("‹ Menu", "m:main")]]))
+            if msg.chat.type == "private":
+                return await ask_lyrics(bot, msg)
+            link = f"https://t.me/{(await bot.me()).username}?start=lyrics"
+            return await edit(cb, help_text(), KB([[B("📩  Open the bot for lyrics", url=link, style="primary")],
+                                                   [B("‹ Menu", "m:main")]]))
         if what == "st":
             text, kb = status_screen(await need_admin(bot, uid))
             return await edit(cb, text, kb)
         if what == "se":
             return await tg_call(lambda: bot.send_message(
                 msg.chat.id, PROMPT_SEARCH, message_thread_id=_thread(msg), reply_markup=ForceReply()))
+    if cmd == "lg":
+        import lyrics
+        lst = LYR.get(p[1])
+        c = lst[int(p[2])] if lst and int(p[2]) < len(lst) else None
+        if not c:
+            return await cb.answer("Search again, this result expired.", show_alert=True)
+        try:
+            await cb.answer("📝 Finding lyrics…")
+            return await lyrics.deliver(bot, None, c["artist"], c["title"], c["duration"], dest=uid)
+        except Exception as e:
+            log.warning("lyrics delivery failed: %s", e)
+            return
     if cmd == "st:retry":
         n = db.execute("SELECT COUNT(*) FROM failed").fetchone()[0]
         db.execute("DELETE FROM failed")

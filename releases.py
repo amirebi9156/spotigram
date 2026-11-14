@@ -30,7 +30,7 @@ import health
 from core import (
     ARTISTS_FILE, AUDIO_FMT_SC, AUDIO_FMT_YT, CHAT_ID, HEADERS, RELEASE_INTERVAL,
     RELEASE_MAX_AGE_HOURS, RELEASE_MAX_ATTEMPTS, RELEASE_MAX_SECONDS, RELEASE_MIN_SECONDS,
-    RELEASES_TOPIC_NAME, db, dl_lock, download_url, fetch_image, log, lyrics_kb, send_audio_topic,
+    RELEASES_TOPIC_NAME, db, dl_lock, download_url, fetch_image, log, send_audio_topic,
     topic_id_for, ytdlp_opts,
 )
 
@@ -262,8 +262,7 @@ async def send_release(
 
         await send_audio_topic(
             bot, "releases_topic", RELEASES_TOPIC_NAME, 0xFB6F5F, FSInputFile(path), title=title,
-            performer=artist.name, duration=duration, thumbnail=thumb, caption=caption,
-            reply_markup=lyrics_kb(),
+            performer=artist.name, duration=duration, thumbnail=thumb, caption=caption
         )
         db.execute(
             "INSERT OR REPLACE INTO releases (key, artist, title, platform, url) VALUES (?,?,?,?,?)",

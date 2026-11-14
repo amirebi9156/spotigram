@@ -23,7 +23,7 @@ from aiogram.types import BufferedInputFile, FSInputFile
 
 from core import (
     AUDIO_FMT_YT, CHAT_ID, HEADERS, PLAYLISTS_FILE, SEND_DELAY, SYNC_INTERVAL,
-    db, dl_lock, fetch_image, log, lyrics_kb, tg_call, ytdlp_opts,
+    db, dl_lock, fetch_image, log, tg_call, ytdlp_opts,
 )
 import health
 
@@ -211,7 +211,7 @@ async def send_track(bot: Bot, topic_id: int, track: dict, session: aiohttp.Clie
     if cached:  # already uploaded once (e.g. same track in another playlist)
         msg = await tg_call(
             lambda: bot.send_audio(
-                CHAT_ID, cached[0], message_thread_id=topic_id, reply_markup=lyrics_kb()
+                CHAT_ID, cached[0], message_thread_id=topic_id
             )
         )
         return msg.message_id
@@ -230,8 +230,7 @@ async def send_track(bot: Bot, topic_id: int, track: dict, session: aiohttp.Clie
                 title=track["title"],
                 performer=track["performer"],
                 duration=track["duration"] or None,
-                thumbnail=thumb,
-                reply_markup=lyrics_kb(),
+                thumbnail=thumb
             )
         )
         db.execute(

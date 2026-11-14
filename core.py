@@ -11,7 +11,6 @@ import aiohttp
 import yt_dlp
 from aiogram import F, Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
 def load_env(path: str = ".env") -> None:
@@ -106,12 +105,6 @@ def dl_lock() -> asyncio.Lock:
     if _dl_lock is None:
         _dl_lock = asyncio.Lock()
     return _dl_lock
-
-
-def lyrics_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="📝 Lyrics", callback_data="lyr")]]
-    )
 
 
 async def tg_call(coro_factory):
